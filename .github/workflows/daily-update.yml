@@ -14,6 +14,8 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       # 1. Trae tu código del repositorio (app.py, entrenar_ia.py, etc.)
       - name: 1. Checkout (Traer código)
