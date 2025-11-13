@@ -1,0 +1,48 @@
+name: Re-Entrenar IA Diariamente
+
+on:
+  # Esto activa el script
+  schedule:
+    # 0 8 * * * = 8:00 AM UTC (que son las 9:00 AM en España en invierno, 10:00 AM en verano)
+    # Si lo quieres a las 8:00 AM de España (CET), pon '0 7 * * *'
+    - cron: '0 7 * * *'
+  
+  # Esto te añade un botón "Run workflow" en la pestaña "Actions"
+  # para que puedas ejecutarlo manualmente cuando quieras.
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Trae tu código del repositorio (app.py, entrenar_ia.py, etc.)
+      - name: 1. Checkout (Traer código)
+        uses: actions/checkout@v4
+
+      # 2. Configura Python
+      - name: 2. Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12' 
+
+      # 3. Instala las librerías de tu requirements.txt
+      - name: 3. Instalar librerías
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      # 4. Ejecuta el script de actualización completo
+      - name: 4. Ejecutar Actualización y Entrenamiento
+        env:
+          # Le pasamos el secreto que guardamos en Paso 1
+          KAGGLE_JSON: ${{ secrets.KAGGLE_JSON }}
+        run: python actualizar_auto.py
+          
+      # 5. Sube los archivos nuevos (modelos, csv) de vuelta a GitHub
+      - name: 5. Subir (Commit) archivos nuevos
+        run: |
+          git config --global user.name "IA Bot"
+          git config --global user.email "bot@github.com"
+          git add .
+          git diff-index --quiet HEAD || git commit -m "🤖 [Auto] Modelos de IA re-entrenados con datos nuevos"
+          git push
