@@ -1,126 +1,119 @@
+import os
 import pandas as pd
 import requests
 import io
 import sys
-import os
+import time
 
 # --- CONFIGURACIÓN ---
 ARCHIVO_FINAL = "atp_tennis.csv"
-# Descargamos desde 2010 para tener una base sólida de veteranos y retirados recientes
-YEARS = range(2010, 2026) 
+YEARS = range(2015, 2026) 
 
-# URL Base de TML (Tennis My Life)
-URL_BASE = "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/{year}.csv"
+# Fuentes
+URL_TML = "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/{year}.csv"
+URL_JEFF_FUTURES = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_futures_{year}.csv"
 
-print("==================================================")
-print("   🚀 ACTUALIZADOR TML (FUENTE: TENNIS MY LIFE) 🚀")
-print("   (Incluye ATP, Challengers y Futures actualizados)")
-print("==================================================")
+# Configuración para GitHub Actions (La Nube)
+KAGGLE_SECRET = os.environ.get("KAGGLE_JSON") # (Ya no se usa pero lo dejamos por compatibilidad)
+
+print("==========================================================")
+print("   🧬 ACTUALIZADOR HÍBRIDO (TML + FUTURES HISTÓRICO) 🧬")
+print("==========================================================")
 
 dfs = []
 
-# Función para formatear nombres: "Novak Djokovic" -> "Djokovic N."
+# Función para formatear nombres
 def formatear_nombre(nombre):
     try:
         if pd.isna(nombre) or not isinstance(nombre, str): return nombre
         nombre = nombre.strip()
         partes = nombre.split()
-        
         if len(partes) < 2: return nombre
         
-        # TML a veces pone "Vallejo Adolfo Daniel". 
-        # Estrategia: Usar la última palabra como apellido principal y la primera letra del primero.
-        # Ojo: En nombres compuestos latinos esto puede fallar levemente, pero es consistente.
-        
-        # Estrategia estándar: "Nombre Apellido" -> "Apellido N."
+        # Estrategia general: "Nombre Apellido" -> "Apellido N."
         nombre_pila = partes[0]
         apellido = " ".join(partes[1:])
-        
         return f"{apellido} {nombre_pila[0]}."
     except:
         return nombre
 
-# --- DESCARGA ---
+# --- 1. DESCARGAR TML (ATP + CHALLENGERS ACTUALIZADOS) ---
+print("\n--- 1. Descargando Circuito Principal (TML) ---")
 for year in YEARS:
-    print(f"⬇️ Descargando {year}...", end=" ")
-    url = URL_BASE.format(year=year)
-    
     try:
-        r = requests.get(url)
+        r = requests.get(URL_TML.format(year=year))
         if r.status_code == 200:
-            # TML usa comas estándar
             df = pd.read_csv(io.StringIO(r.text))
-            
-            # Filtro de seguridad: Aseguramos que tenga las columnas clave
-            if 'winner_name' in df.columns and 'loser_name' in df.columns:
-                dfs.append(df)
-                print(f"✅ {len(df)} partidos.")
-            else:
-                print(f"⚠️ Formato desconocido.")
-        else:
-            print(f"❌ No encontrado (HTTP {r.status_code})")
-            
+            # Estandarizar columnas de TML a nuestro formato
+            cols_map = {
+                'tourney_date': 'Date', 'surface': 'Surface',
+                'winner_name': 'Player_1', 'loser_name': 'Player_2',
+                'winner_rank': 'Rank_1', 'loser_rank': 'Rank_2',
+                'score': 'Score', 'best_of': 'Best of'
+            }
+            df.rename(columns=cols_map, inplace=True)
+            df = df[[c for c in cols_map.values() if c in df.columns]] # Solo columnas útiles
+            df['Origen'] = 'TML'
+            dfs.append(df)
+            print(f"   ✅ {year}: {len(df)} partidos")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        pass # Si falla un año (ej: 2025 aun no completo), seguimos
+
+# --- 2. DESCARGAR JEFF SACKMANN (SOLO FUTURES) ---
+print("\n--- 2. Descargando Futures/ITF (Jeff Sackmann) ---")
+for year in YEARS:
+    try:
+        r = requests.get(URL_JEFF_FUTURES.format(year=year))
+        if r.status_code == 200:
+            df = pd.read_csv(io.StringIO(r.text))
+            # Estandarizar columnas de Jeff a nuestro formato
+            cols_map = {
+                'tourney_date': 'Date', 'surface': 'Surface',
+                'winner_name': 'Player_1', 'loser_name': 'Player_2',
+                'winner_rank': 'Rank_1', 'loser_rank': 'Rank_2',
+                'score': 'Score', 'best_of': 'Best of'
+            }
+            df.rename(columns=cols_map, inplace=True)
+            df = df[[c for c in cols_map.values() if c in df.columns]]
+            df['Origen'] = 'Futures'
+            dfs.append(df)
+            print(f"   ✅ Futures {year}: {len(df)} partidos (Aquí está Gima)")
+    except Exception as e:
+        pass # Futures 2025 puede no estar aún, no importa
 
 if not dfs:
-    print("❌ Error Crítico: No se descargó nada.")
+    print("❌ Error: No se descargó nada.")
     sys.exit()
 
-# --- FUSIÓN ---
-print("\n--- 🔄 Procesando y Estandarizando Datos... ---")
+# --- FUSIÓN Y LIMPIEZA ---
+print("\n--- 🔄 Fusionando y Procesando... ---")
 df_total = pd.concat(dfs, ignore_index=True)
 
-# Selección y Renombrado de columnas para tu sistema
-# TML tiene muchas columnas ricas (w_ace, minutes), las guardamos por si acaso
-# pero renombramos las esenciales para que 'crear_ia.py' no se rompa.
-
-cols_map = {
-    'tourney_date': 'Date',
-    'surface': 'Surface',
-    'winner_name': 'Player_1',  # Asumimos ganador en P1 para el formato
-    'loser_name': 'Player_2',
-    'winner_rank': 'Rank_1',
-    'loser_rank': 'Rank_2',
-    'score': 'Score',
-    'best_of': 'Best of',
-    'tourney_level': 'Tourney_Level' # Importante para saber si es Challenger
-}
-
-# Nos aseguramos de que existan antes de renombrar
-cols_existentes = {k: v for k, v in cols_map.items() if k in df_total.columns}
-df_total.rename(columns=cols_existentes, inplace=True)
-
-# Crear columna Winner explícita (Player_1 siempre es el ganador en el raw data)
+# Crear columna Winner
 df_total['Winner'] = df_total['Player_1']
 
-# Formatear Fechas (TML usa YYYYMMDD o YYYY-MM-DD, pandas lo suele detectar)
+# Formatear Fechas
 df_total['Date'] = pd.to_datetime(df_total['Date'], format='%Y%m%d', errors='coerce')
 
-# --- FORMATEO DE NOMBRES (CRUCIAL PARA EL BUSCADOR) ---
-print("🧹 Formateando nombres (esto tarda unos segundos)...")
-# Hacemos esto porque TML usa nombres completos y nosotros queremos 'Apellido N.'
+# Formatear Nombres (CRUCIAL para que coincidan)
+print("🧹 Normalizando nombres (esto tarda un poco)...")
 df_total['Player_1'] = df_total['Player_1'].apply(formatear_nombre)
 df_total['Player_2'] = df_total['Player_2'].apply(formatear_nombre)
-df_total['Winner'] = df_total['Player_1'] # Actualizamos Winner con el nombre formateado
+df_total['Winner'] = df_total['Player_1']
 
 # Guardar
 df_total.to_csv(ARCHIVO_FINAL, index=False)
-print(f"✅ Base de datos guardada: {len(df_total)} partidos.")
-
+print(f"✅ Base de datos FINAL guardada: {len(df_total)} partidos.")
 
 # --- RE-ENTRENAMIENTO ---
-print("\n--- 🧠 Entrenando IA... ---")
+print("\n--- 🧠 Re-Entrenando IA... ---")
 
-print("> 1. Ejecutando crear_ia.py...")
 if os.system("python crear_ia.py") != 0: 
     print("❌ Error en crear_ia.py")
     sys.exit()
 
-print("> 2. Ejecutando entrenar_ia.py...")
 if os.system("python entrenar_ia.py") != 0:
     print("❌ Error en entrenar_ia.py")
     sys.exit()
 
-print("\n🎉 ¡SISTEMA ACTUALIZADO Y LISTO! 🎉")
-print("Ahora puedes buscar a 'Vallejo D.' en tu web.")
+print("\n🎉 ¡SISTEMA HÍBRIDO LISTO! Subiendo resultados...")
