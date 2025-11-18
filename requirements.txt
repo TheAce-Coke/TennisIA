@@ -1,4 +1,6 @@
 pandas
 scikit-learn
 streamlit
-kaggle
+requests
+beautifulsoup4
+lxml
