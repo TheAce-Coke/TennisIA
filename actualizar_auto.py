@@ -1,111 +1,126 @@
-import os
-import zipfile
+import pandas as pd
+import requests
+import io
 import sys
-import time
-
-# --- INICIO: CONFIGURACIÓN PARA GITHUB ACTIONS ---
-# Esta parte es nueva. Comprueba si estamos en la nube.
-KAGGLE_SECRET = os.environ.get("KAGGLE_JSON")
-
-if KAGGLE_SECRET:
-    print("--- 1. Detectado entorno GitHub Actions. Configurando Kaggle... ---")
-    # Si el secreto existe, lo escribimos en el archivo .json
-    # que la librería 'kaggle' espera encontrar.
-    kaggle_dir = os.path.expanduser("~/.kaggle")
-    os.makedirs(kaggle_dir, exist_ok=True)
-    
-    with open(os.path.join(kaggle_dir, "kaggle.json"), "w") as f:
-        f.write(KAGGLE_SECRET)
-    
-    # Damos permisos de lectura/escritura solo al propietario
-    os.chmod(os.path.join(kaggle_dir, "kaggle.json"), 0o600)
-    print("✅ Credenciales de Kaggle configuradas en la nube.")
-else:
-    print("--- 1. Detectado entorno Local (PC). Usando kaggle.json local. ---")
-# --- FIN: CONFIGURACIÓN PARA GITHUB ACTIONS ---
-
+import os
 
 # --- CONFIGURACIÓN ---
-DATASET = "dissfya/atp-tennis-2000-2023daily-pull"
-ARCHIVO_FINAL = "atp_tennis.csv" 
+ARCHIVO_FINAL = "atp_tennis.csv"
+# Descargamos desde 2010 para tener una base sólida de veteranos y retirados recientes
+YEARS = range(2010, 2026) 
+
+# URL Base de TML (Tennis My Life)
+URL_BASE = "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/{year}.csv"
 
 print("==================================================")
-print("   🤖 ACTUALIZADOR AUTOMÁTICO (VERSIÓN NUBE/LOCAL) 🤖")
+print("   🚀 ACTUALIZADOR TML (FUENTE: TENNIS MY LIFE) 🚀")
+print("   (Incluye ATP, Challengers y Futures actualizados)")
 print("==================================================")
 
-# 2. DESCARGAR DESDE KAGGLE
-print("\n--- 2. Descargando datos frescos desde Kaggle... ---")
-comando = f"kaggle datasets download -d {DATASET} --force"
-codigo = os.system(comando)
+dfs = []
 
-if codigo != 0:
-    print("❌ Error al descargar.")
-    sys.exit()
-else:
-    print("✅ Descarga completada.")
-    time.sleep(2) 
-
-# 3. BUSCAR EL ZIP AUTOMÁTICAMENTE
-print("\n--- 3. Buscando el archivo ZIP descargado... ---")
-archivo_zip_encontrado = None
-archivos_en_carpeta = os.listdir(".")
-
-for archivo in archivos_en_carpeta:
-    if archivo.endswith(".zip") and ("atp" in archivo.lower() or "tennis" in archivo.lower()):
-        archivo_zip_encontrado = archivo
-        break
-
-if not archivo_zip_encontrado:
-    print("❌ Error: No encuentro el .zip.")
-    sys.exit()
-
-print(f"✅ ZIP encontrado: {archivo_zip_encontrado}")
-
-# 4. DESCOMPRIMIR Y PREPARAR
-print("\n--- 4. Descomprimiendo... ---")
-try:
-    with zipfile.ZipFile(archivo_zip_encontrado, 'r') as zip_ref:
-        zip_ref.extractall(".")
-        archivos_extraidos = zip_ref.namelist()
+# Función para formatear nombres: "Novak Djokovic" -> "Djokovic N."
+def formatear_nombre(nombre):
+    try:
+        if pd.isna(nombre) or not isinstance(nombre, str): return nombre
+        nombre = nombre.strip()
+        partes = nombre.split()
         
-        csv_encontrado = None
-        for archivo in archivos_extraidos:
-            if archivo.endswith(".csv"):
-                csv_encontrado = archivo
-                break
+        if len(partes) < 2: return nombre
         
-        if csv_encontrado:
-            print(f"   -> Archivo extraído: {csv_encontrado}")
-            if csv_encontrado != ARCHIVO_FINAL:
-                if os.path.exists(ARCHIVO_FINAL):
-                    os.remove(ARCHIVO_FINAL) 
-                os.rename(csv_encontrado, ARCHIVO_FINAL)
-                print(f"✅ Renombrado a: {ARCHIVO_FINAL}")
+        # TML a veces pone "Vallejo Adolfo Daniel". 
+        # Estrategia: Usar la última palabra como apellido principal y la primera letra del primero.
+        # Ojo: En nombres compuestos latinos esto puede fallar levemente, pero es consistente.
+        
+        # Estrategia estándar: "Nombre Apellido" -> "Apellido N."
+        nombre_pila = partes[0]
+        apellido = " ".join(partes[1:])
+        
+        return f"{apellido} {nombre_pila[0]}."
+    except:
+        return nombre
+
+# --- DESCARGA ---
+for year in YEARS:
+    print(f"⬇️ Descargando {year}...", end=" ")
+    url = URL_BASE.format(year=year)
+    
+    try:
+        r = requests.get(url)
+        if r.status_code == 200:
+            # TML usa comas estándar
+            df = pd.read_csv(io.StringIO(r.text))
+            
+            # Filtro de seguridad: Aseguramos que tenga las columnas clave
+            if 'winner_name' in df.columns and 'loser_name' in df.columns:
+                dfs.append(df)
+                print(f"✅ {len(df)} partidos.")
             else:
-                print(f"✅ El archivo ya tiene el nombre correcto ({ARCHIVO_FINAL}).")
-
-            zip_ref.close()
-            os.remove(archivo_zip_encontrado)
+                print(f"⚠️ Formato desconocido.")
         else:
-            print("❌ Error: El zip no tenía ningún .csv dentro.")
-            sys.exit()
+            print(f"❌ No encontrado (HTTP {r.status_code})")
+            
+    except Exception as e:
+        print(f"❌ Error: {e}")
 
-except Exception as e:
-    print(f"❌ Error al procesar zip: {e}")
+if not dfs:
+    print("❌ Error Crítico: No se descargó nada.")
     sys.exit()
 
-# 5. EJECUTAR PIPELINE DE IA
-print("\n--- 5. Ejecutando crear_ia.py ---")
-if os.system("python crear_ia.py") != 0:
+# --- FUSIÓN ---
+print("\n--- 🔄 Procesando y Estandarizando Datos... ---")
+df_total = pd.concat(dfs, ignore_index=True)
+
+# Selección y Renombrado de columnas para tu sistema
+# TML tiene muchas columnas ricas (w_ace, minutes), las guardamos por si acaso
+# pero renombramos las esenciales para que 'crear_ia.py' no se rompa.
+
+cols_map = {
+    'tourney_date': 'Date',
+    'surface': 'Surface',
+    'winner_name': 'Player_1',  # Asumimos ganador en P1 para el formato
+    'loser_name': 'Player_2',
+    'winner_rank': 'Rank_1',
+    'loser_rank': 'Rank_2',
+    'score': 'Score',
+    'best_of': 'Best of',
+    'tourney_level': 'Tourney_Level' # Importante para saber si es Challenger
+}
+
+# Nos aseguramos de que existan antes de renombrar
+cols_existentes = {k: v for k, v in cols_map.items() if k in df_total.columns}
+df_total.rename(columns=cols_existentes, inplace=True)
+
+# Crear columna Winner explícita (Player_1 siempre es el ganador en el raw data)
+df_total['Winner'] = df_total['Player_1']
+
+# Formatear Fechas (TML usa YYYYMMDD o YYYY-MM-DD, pandas lo suele detectar)
+df_total['Date'] = pd.to_datetime(df_total['Date'], format='%Y%m%d', errors='coerce')
+
+# --- FORMATEO DE NOMBRES (CRUCIAL PARA EL BUSCADOR) ---
+print("🧹 Formateando nombres (esto tarda unos segundos)...")
+# Hacemos esto porque TML usa nombres completos y nosotros queremos 'Apellido N.'
+df_total['Player_1'] = df_total['Player_1'].apply(formatear_nombre)
+df_total['Player_2'] = df_total['Player_2'].apply(formatear_nombre)
+df_total['Winner'] = df_total['Player_1'] # Actualizamos Winner con el nombre formateado
+
+# Guardar
+df_total.to_csv(ARCHIVO_FINAL, index=False)
+print(f"✅ Base de datos guardada: {len(df_total)} partidos.")
+
+
+# --- RE-ENTRENAMIENTO ---
+print("\n--- 🧠 Entrenando IA... ---")
+
+print("> 1. Ejecutando crear_ia.py...")
+if os.system("python crear_ia.py") != 0: 
     print("❌ Error en crear_ia.py")
     sys.exit()
 
-print("\n--- 6. Ejecutando entrenar_ia.py ---")
+print("> 2. Ejecutando entrenar_ia.py...")
 if os.system("python entrenar_ia.py") != 0:
     print("❌ Error en entrenar_ia.py")
     sys.exit()
 
-print("\n")
-print("==================================================")
-print("       🎉 ¡SISTEMA ACTUALIZADO AUTOMÁTICAMENTE! 🎉")
-print("==================================================")
+print("\n🎉 ¡SISTEMA ACTUALIZADO Y LISTO! 🎉")
+print("Ahora puedes buscar a 'Vallejo D.' en tu web.")
