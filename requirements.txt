@@ -1,6 +1,10 @@
 pandas
+numpy
 scikit-learn
+joblib
 streamlit
 requests
 beautifulsoup4
 lxml
+scipy
+plotly
