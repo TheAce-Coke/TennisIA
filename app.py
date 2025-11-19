@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
-from scipy.stats import norm # <--- Necesario para calcular probabilidades O/U
+from scipy.stats import norm
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="NeuralTennis Pro", page_icon="🎾", layout="centered")
@@ -29,7 +29,6 @@ def load_system():
         m_games = joblib.load('modelo_juegos.joblib')
         feats = joblib.load('features.joblib')
         db = joblib.load('database_reciente.joblib')
-        # Cargamos la desviación estándar para calcular probabilidades O/U
         std_g = joblib.load('std_juegos.joblib') 
         return m_win, m_games, feats, db, std_g
     except: return None, None, None, None, None
@@ -37,7 +36,7 @@ def load_system():
 model_win, model_games, features, db, std_games = load_system()
 
 if db is None:
-    st.error("❌ Ejecuta 'entrenar_ia.py' de nuevo para generar los archivos de Over/Under.")
+    st.error("❌ Ejecuta 'entrenar_ia.py' de nuevo para generar los archivos necesarios.")
     st.stop()
 
 def get_last_stats(player_name):
@@ -54,14 +53,29 @@ def get_last_stats(player_name):
 st.title("🎾 NeuralTennis Pro")
 all_players = sorted(db['player_name'].unique())
 
-c1, c2 = st.columns(2)
-with c1: p1 = st.selectbox("J1", all_players, index=0)
-with c2: p2 = st.selectbox("J2", all_players, index=1)
-col_conf1, col_conf2 = st.columns(2)
-with col_conf1: surface = st.selectbox("Superficie", ["Hard", "Clay", "Grass"])
-with col_conf2: best_of = st.selectbox("Sets", [3, 5])
+# === GESTIÓN DE ESTADO (LA SOLUCIÓN) ===
+if 'analisis_activo' not in st.session_state:
+    st.session_state.analisis_activo = False
 
+# Si cambiamos de jugadores, reseteamos el análisis para no mostrar datos antiguos
+def resetear_analisis():
+    st.session_state.analisis_activo = False
+
+c1, c2 = st.columns(2)
+# Añadimos on_change para resetear si cambias de jugador
+with c1: p1 = st.selectbox("J1", all_players, index=0, on_change=resetear_analisis)
+with c2: p2 = st.selectbox("J2", all_players, index=1, on_change=resetear_analisis)
+
+col_conf1, col_conf2 = st.columns(2)
+with col_conf1: surface = st.selectbox("Superficie", ["Hard", "Clay", "Grass"], on_change=resetear_analisis)
+with col_conf2: best_of = st.selectbox("Sets", [3, 5], on_change=resetear_analisis)
+
+# BOTÓN: Al hacer click, activamos el estado persistente
 if st.button("🔮 Analizar Mercados", type="primary", use_container_width=True):
+    st.session_state.analisis_activo = True
+
+# LÓGICA PRINCIPAL (Ahora depende del estado, no del botón directamente)
+if st.session_state.analisis_activo:
     if p1 == p2: st.warning("Elige jugadores distintos.")
     else:
         d1, d2 = get_last_stats(p1), get_last_stats(p2)
@@ -85,7 +99,7 @@ if st.button("🔮 Analizar Mercados", type="primary", use_container_width=True)
                 if f not in X_in.columns: X_in[f] = 0
             X_in = X_in[features]
 
-            # 2. Predicciones Base
+            # 2. Predicciones
             prob_p1 = model_win.predict_proba(X_in)[0][1]
             pred_games = model_games.predict(X_in)[0]
             
@@ -107,10 +121,9 @@ if st.button("🔮 Analizar Mercados", type="primary", use_container_width=True)
             </div>
             """, unsafe_allow_html=True)
 
-            # === CALCULADORAS DE APUESTAS ===
+            # === CALCULADORAS ===
             t1, t2, t3 = st.tabs(["🏆 Ganador", "🔢 Over/Under", "🏁 Hándicap"])
 
-            # TAB 1: GANADOR
             with t1:
                 st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
                 c_odd, c_res = st.columns([1, 2])
@@ -123,60 +136,43 @@ if st.button("🔮 Analizar Mercados", type="primary", use_container_width=True)
                     else: st.markdown(f"<div class='val-bad'>❌ SIN VALOR ({edge*100:.1f}%)</div>", unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            # TAB 2: OVER/UNDER (NUEVO Y POTENTE)
             with t2:
                 st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
-                st.info(f"🧠 La IA predice **{pred_games:.1f}** juegos. Calculando probabilidades usando campana de Gauss...")
+                st.info(f"🧠 La IA predice **{pred_games:.1f}** juegos. Calculando probabilidades...")
                 
                 col_line, col_odd_ou = st.columns(2)
+                # IMPORTANTE: Como estamos dentro de session_state, cambiar estos inputs NO cerrará la vista
                 with col_line: line_ou = st.number_input("Línea Juegos (ej: 22.5)", value=float(int(pred_games)), step=0.5)
                 with col_odd_ou: odd_ou = st.number_input("Cuota Over", value=1.85, step=0.05)
                 
-                # --- MATEMÁTICA GAUSSIANA ---
-                # Z-Score = (Línea - Predicción) / Desviación
-                # Prob Over = 1 - CDF(Z)
                 z_score = (line_ou - pred_games) / std_games
                 prob_under = norm.cdf(z_score)
                 prob_over = 1 - prob_under
                 
                 col_res_over, col_res_under = st.columns(2)
-                
-                # Análisis OVER
                 with col_res_over:
                     st.write(f"**OVER {line_ou}**")
                     st.write(f"Prob: **{prob_over*100:.1f}%**")
                     fair_odd_over = 1/prob_over if prob_over > 0 else 99
-                    st.write(f"Cuota Justa: {fair_odd_over:.2f}")
-                    
                     edge_over = prob_over - (1/odd_ou)
-                    if edge_over > 0.02: st.markdown(f"<span class='val-good'>✅ VALOR</span>", unsafe_allow_html=True)
+                    if edge_over > 0.02: st.markdown(f"<span class='val-good'>✅ VALOR (Cuota > {fair_odd_over:.2f})</span>", unsafe_allow_html=True)
                     else: st.markdown(f"<span class='val-bad'>❌ NO ENTRAR</span>", unsafe_allow_html=True)
 
-                # Análisis UNDER
                 with col_res_under:
                     st.write(f"**UNDER {line_ou}**")
                     st.write(f"Prob: **{prob_under*100:.1f}%**")
                     fair_odd_under = 1/prob_under if prob_under > 0 else 99
-                    st.write(f"Cuota Justa: {fair_odd_under:.2f}")
-
+                    st.write(f"Cuota justa: {fair_odd_under:.2f}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            # TAB 3: HÁNDICAP (ESTIMADO)
             with t3:
                 st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
-                # Estimación simple: Si P1 tiene 80% de ganar, se espera un hándicap negativo
-                expected_diff = (prob_p1 - 0.5) * 8 # Factor empírico aproximado
-                st.write(f"Diferencia de juegos esperada: **{expected_diff:.1f}** para {p1}")
-                
+                expected_diff = (prob_p1 - 0.5) * 8 
+                st.write(f"Diferencia esperada: **{expected_diff:.1f}** juegos para {p1}")
                 h_line = st.number_input(f"Hándicap {p1} (ej: -3.5)", value=-2.5, step=0.5)
-                
-                # Lógica difusa para probabilidad de hándicap
-                # Usamos una sigmoide ajustada basada en la diferencia esperada vs línea
-                dist = expected_diff - h_line # Si espero ganar por 4 y la línea es -2.5, dist = 1.5 (bueno)
-                prob_cover = 1 / (1 + np.exp(-0.5 * dist)) # Función sigmoide suave
-                
+                dist = expected_diff - h_line
+                prob_cover = 1 / (1 + np.exp(-0.5 * dist))
                 st.write(f"Probabilidad de cubrir {h_line}: **{prob_cover*100:.1f}%**")
-                st.caption("Nota: El hándicap es una estimación experimental basada en la probabilidad de victoria.")
                 st.markdown("</div>", unsafe_allow_html=True)
 
         else: st.error("Faltan datos.")
