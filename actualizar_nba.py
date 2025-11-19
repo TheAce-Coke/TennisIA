@@ -1,89 +1,110 @@
+import os
 import pandas as pd
-import time
-import random
-from nba_api.stats.endpoints import leaguegamelog
-import requests.adapters
+import json
+import glob
+from kaggle.api.kaggle_api_extended import KaggleApi
 
-# --- CONFIGURACIÓN ROBUSTA ---
+# --- CONFIGURACIÓN ---
+DATASET_KAGGLE = "eoinamoore/historical-nba-data-and-player-box-scores"
 ARCHIVO_SALIDA = "nba_games.csv"
-TEMPORADAS = ['2020-21', '2021-22', '2022-23', '2023-24', '2024-25']
-TIMEOUT_SEG = 100  # Subimos tiempo de espera a 100 segundos
-MAX_RETRIES = 3    # Intentos por temporada
 
-# Headers para parecer un navegador real y evitar bloqueo
-HEADERS_CUSTOM = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': 'https://www.nba.com/',
-    'Connection': 'keep-alive'
-}
+# Configuración de Autenticación para GitHub Actions o Local
+# Si existe la variable de entorno KAGGLE_JSON (en GitHub), la usamos para crear el archivo credentials
+if "KAGGLE_JSON" in os.environ:
+    os.makedirs(os.path.expanduser("~/.kaggle"), exist_ok=True)
+    with open(os.path.expanduser("~/.kaggle/kaggle.json"), "w") as f:
+        f.write(os.environ["KAGGLE_JSON"])
+    os.chmod(os.path.expanduser("~/.kaggle/kaggle.json"), 0o600)
 
 print("==========================================================")
-print("   🏀 ACTUALIZADOR NBA (MODO ROBUSTO) 🏀")
+print("   🏀 ACTUALIZADOR NBA (FUENTE: KAGGLE) 🏀")
 print("==========================================================")
 
-dfs = []
-
-def descargar_con_reintentos(season, tipo):
-    intentos = 0
-    while intentos < MAX_RETRIES:
-        try:
-            print(f"   ⏳ Intento {intentos+1} para {season} ({tipo})...", end=" ")
-            
-            # Llamada a la API con Timeout ampliado
-            log = leaguegamelog.LeagueGameLog(
-                season=season, 
-                season_type_all_star=tipo,
-                headers=HEADERS_CUSTOM,
-                timeout=TIMEOUT_SEG 
-            )
-            df = log.get_data_frames()[0]
-            df['SeasonType'] = tipo
-            print(f"✅ Ok ({len(df)} juegos)")
-            return df
-            
-        except Exception as e:
-            print(f"❌ Fallo: {e}")
-            intentos += 1
-            # Espera exponencial: 5s, 10s, 15s... para que no nos baneen
-            wait_time = 5 * intentos + random.randint(1, 3)
-            time.sleep(wait_time)
-            
-    print(f"   ⚠️ IMPOSIBLE descargar {season} {tipo} tras {MAX_RETRIES} intentos.")
-    return None
-
-# --- PROCESO DE DESCARGA ---
-for temp in TEMPORADAS:
-    print(f"⬇️ Procesando {temp}...")
+try:
+    print(f"⬇️  Autenticando en Kaggle y descargando {DATASET_KAGGLE}...")
+    api = KaggleApi()
+    api.authenticate()
     
-    # 1. Regular Season
-    df_reg = descargar_con_reintentos(temp, 'Regular Season')
-    if df_reg is not None: dfs.append(df_reg)
+    # Descargar y descomprimir en la carpeta actual
+    api.dataset_download_files(DATASET_KAGGLE, path=".", unzip=True)
+    print("✅ Descarga y descompresión completada.")
+
+    # --- BÚSQUEDA Y PROCESADO ---
+    # Kaggle suele cambiar los nombres de los archivos. Buscamos el CSV principal.
+    # En este dataset suele haber un 'game_logs.csv' o similar.
+    csv_files = glob.glob("*.csv")
+    target_file = None
     
-    # Pausa de seguridad entre llamadas
-    time.sleep(random.randint(2, 5))
+    # Buscamos un archivo que parezca tener logs de partidos
+    for f in csv_files:
+        if "game" in f.lower() or "box_score" in f.lower():
+            target_file = f
+            break
     
-    # 2. Playoffs
-    df_play = descargar_con_reintentos(temp, 'Playoffs')
-    if df_play is not None: dfs.append(df_play)
+    if not target_file:
+        # Fallback: cogemos el más grande
+        target_file = max(csv_files, key=os.path.getsize)
+
+    print(f"📂 Procesando archivo: {target_file}")
+    df = pd.read_csv(target_file)
+
+    # --- NORMALIZACIÓN DE COLUMNAS (CRÍTICO) ---
+    # La IA espera nombres específicos (UPPERCASE). Kaggle suele usar lowercase.
+    # Hacemos un mapa de renombrado inteligente.
     
-    print("-" * 30)
+    # Convertimos todo a mayúsculas primero para facilitar
+    df.columns = [c.upper() for c in df.columns]
+    
+    # Mapa de columnas necesarias para NeuralSports
+    mapa_cols = {
+        'GAME_DATE': ['DATE', 'GAMEDATE'],
+        'MATCHUP': ['MATCHUP', 'MATCH_UP'],
+        'WL': ['W_L', 'WIN_LOSS', 'WL'],
+        'PTS': ['PTS', 'POINTS'],
+        'FGA': ['FGA'],
+        'FTA': ['FTA'],
+        'TOV': ['TOV', 'TURNOVERS'],
+        'OREB': ['OREB', 'ORB', 'OFF_REB'],
+        'TEAM_NAME': ['TEAM', 'TEAM_NAME'],
+        'TEAM_ID': ['TEAM_ID'],
+        'GAME_ID': ['GAME_ID']
+    }
+    
+    rename_dict = {}
+    for std_col, candidates in mapa_cols.items():
+        for cand in candidates:
+            if cand in df.columns:
+                rename_dict[cand] = std_col
+                break
+            # Si ya existe la columna exacta, perfecto
+            if std_col in df.columns:
+                rename_dict[std_col] = std_col
+                break
+    
+    df.rename(columns=rename_dict, inplace=True)
+    
+    # Verificar que tenemos las esenciales
+    required = ['GAME_DATE', 'PTS', 'TEAM_NAME']
+    missing = [c for c in required if c not in df.columns]
+    
+    if missing:
+        print(f"❌ Error: El dataset de Kaggle no tiene las columnas: {missing}")
+        print(f"Columnas encontradas: {list(df.columns)}")
+        exit()
 
-if not dfs:
-    print("❌ ERROR CRÍTICO: No se ha podido descargar NINGÚN dato de la NBA.")
-    # Creamos un CSV vacío para que el workflow no explote en el siguiente paso, aunque no funcionará la IA
-    pd.DataFrame(columns=['GAME_DATE', 'MATCHUP']).to_csv(ARCHIVO_SALIDA, index=False)
-    exit()
+    # Filtrar y ordenar
+    if 'GAME_DATE' in df.columns:
+        df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
+        df.sort_values('GAME_DATE', inplace=True)
+        
+        # Filtrar solo desde 2020 para mantener consistencia con la IA
+        df = df[df['GAME_DATE'].dt.year >= 2020]
 
-# --- FUSIÓN ---
-print("\n--- 🔄 Fusionando Datos... ---")
-df_total = pd.concat(dfs, ignore_index=True)
+    df.to_csv(ARCHIVO_SALIDA, index=False)
+    print(f"✅ Base de datos NBA guardada: {len(df)} registros.")
 
-# Limpieza
-if 'GAME_DATE' in df_total.columns:
-    df_total['GAME_DATE'] = pd.to_datetime(df_total['GAME_DATE'])
-    df_total.sort_values('GAME_DATE', inplace=True)
-
-df_total.to_csv(ARCHIVO_SALIDA, index=False)
-print(f"✅ Base de datos NBA guardada: {len(df_total)} registros.")
-print("Listo para crear_ia_nba.py")
+except Exception as e:
+    print(f"❌ Error descargando de Kaggle: {e}")
+    # Generar archivo vacío para no romper el workflow si falla
+    if not os.path.exists(ARCHIVO_SALIDA):
+        pd.DataFrame(columns=['GAME_DATE', 'MATCHUP']).to_csv(ARCHIVO_SALIDA, index=False)
