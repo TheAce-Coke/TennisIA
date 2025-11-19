@@ -71,7 +71,7 @@ joblib.dump(features, 'features.joblib')
 
 # Base de datos ligera para la APP (último registro por jugador)
 print("💾 Generando DB optimizada...")
-cols_db = ['player_name', 'Date', 'player_rank', 'player_elo', 'ewma_form', 'ewma_serve', 'ewma_surface', 'days_rest']
+cols_db = ['player_name', 'Date', 'player_rank', 'player_elo', 'ewma_form', 'ewma_serve', 'ewma_return', 'ewma_surface', 'days_rest']
 df_last = df.sort_values('Date').groupby('player_name').tail(1)[cols_db]
 joblib.dump(df_last, 'db_players.joblib')
 

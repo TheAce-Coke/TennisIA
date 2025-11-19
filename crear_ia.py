@@ -18,37 +18,27 @@ def calcular_juegos(score_str):
 def calcular_elo_optimizado(df):
     elo_dict = {}
     p1_elo, p2_elo = [], []
-    
     for index, row in df.iterrows():
         p1, p2 = row['Player_1'], row['Player_2']
-        e1 = elo_dict.get(p1, START_ELO)
-        e2 = elo_dict.get(p2, START_ELO)
-        
-        p1_elo.append(e1)
-        p2_elo.append(e2)
-        
+        e1, e2 = elo_dict.get(p1, START_ELO), elo_dict.get(p2, START_ELO)
+        p1_elo.append(e1); p2_elo.append(e2)
         prob_p1 = 1 / (1 + 10 ** ((e2 - e1) / 400))
-        
-        # Actualización post-partido
-        new_e1 = e1 + K_FACTOR * (1 - prob_p1)
-        new_e2 = e2 + K_FACTOR * (0 - (1 - prob_p1))
-        
-        elo_dict[p1] = new_e1
-        elo_dict[p2] = new_e2
-        
+        # Update
+        elo_dict[p1] = e1 + K_FACTOR * (1 - prob_p1)
+        elo_dict[p2] = e2 + K_FACTOR * (0 - (1 - prob_p1))
     df['elo_1'] = p1_elo
     df['elo_2'] = p2_elo
     return df
 
-# --- CARGA Y LIMPIEZA ---
-print(f"--- 1. Ingeniería de Datos Avanzada (EWMA) ---")
+def safe_div(a, b): return np.where(b > 0, a / b, 0)
+
+print(f"--- 1. Ingeniería de Datos Quant (Stats Reales) ---")
 df = pd.read_csv(NOMBRE_ARCHIVO)
 df['Date'] = pd.to_datetime(df['Date'])
 df = df.sort_values(by='Date')
 
-# Rellenar nulos numéricos
-cols_stats = ['P1_Ace', 'P1_DF', 'P1_SvPt', 'P1_1stIn', 'P1_1stWon', 'P1_BpSaved', 'P1_BpFaced',
-              'P2_Ace', 'P2_DF', 'P2_SvPt', 'P2_1stIn', 'P2_1stWon', 'P2_BpSaved', 'P2_BpFaced']
+# Limpieza y Nulos
+cols_stats = ['P1_SvPt', 'P1_1stIn', 'P1_1stWon', 'P1_2ndWon', 'P2_SvPt', 'P2_1stIn', 'P2_1stWon', 'P2_2ndWon']
 for c in cols_stats:
     if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
     else: df[c] = 0
@@ -57,16 +47,25 @@ df = calcular_elo_optimizado(df)
 col_score = 'Score' if 'Score' in df.columns else 'score'
 df['total_games'] = df[col_score].apply(calcular_juegos)
 
-# --- DUPLICACIÓN DE PERSPECTIVA ---
-# Necesitamos ver el partido desde los ojos de ambos jugadores
-cols_p1 = ['Player_1', 'Rank_1', 'elo_1'] + [c for c in cols_stats if 'P1_' in c]
-cols_p2 = ['Player_2', 'Rank_2', 'elo_2'] + [c for c in cols_stats if 'P2_' in c]
+# --- ESTADÍSTICAS REALES DE SAQUE/RESTO ---
+# Calculamos % de puntos ganados al saque (Serve Points Won)
+df['P1_SrvPtsWon'] = df['P1_1stWon'] + df['P1_2ndWon']
+df['P2_SrvPtsWon'] = df['P2_1stWon'] + df['P2_2ndWon']
 
-rn_p1 = {'Player_1': 'player_name', 'Rank_1': 'player_rank', 'elo_1': 'player_elo'}
-rn_p1.update({c: c.replace('P1_', 'stats_') for c in cols_p1 if 'P1_' in c})
+df['P1_Serve_Pct'] = safe_div(df['P1_SrvPtsWon'], df['P1_SvPt'])
+df['P2_Serve_Pct'] = safe_div(df['P2_SrvPtsWon'], df['P2_SvPt'])
 
-rn_p2 = {'Player_2': 'player_name', 'Rank_2': 'player_rank', 'elo_2': 'player_elo'}
-rn_p2.update({c: c.replace('P2_', 'stats_') for c in cols_p2 if 'P2_' in c})
+# Calculamos % de puntos ganados al resto (Return Points Won)
+# Puntos Resto Ganados = Puntos Saque del Rival Totales - Puntos Saque del Rival Ganados
+df['P1_Rtn_Pct'] = 1 - df['P2_Serve_Pct']
+df['P2_Rtn_Pct'] = 1 - df['P1_Serve_Pct']
+
+# --- DUPLICACIÓN ---
+cols_p1 = ['Player_1', 'Rank_1', 'elo_1', 'P1_Serve_Pct', 'P1_Rtn_Pct']
+cols_p2 = ['Player_2', 'Rank_2', 'elo_2', 'P2_Serve_Pct', 'P2_Rtn_Pct']
+
+rn_p1 = {'Player_1': 'player_name', 'Rank_1': 'player_rank', 'elo_1': 'player_elo', 'P1_Serve_Pct': 'stats_serve', 'P1_Rtn_Pct': 'stats_return'}
+rn_p2 = {'Player_2': 'player_name', 'Rank_2': 'player_rank', 'elo_2': 'player_elo', 'P2_Serve_Pct': 'stats_serve', 'P2_Rtn_Pct': 'stats_return'}
 
 df_1 = df.copy()
 df_1.rename(columns=rn_p1, inplace=True)
@@ -84,23 +83,14 @@ df_2['result'] = 0
 
 df_full = pd.concat([df_1, df_2], ignore_index=True).sort_values(by='Date')
 
-# --- INGENIERÍA DE FEATURES (THE QUANT WAY) ---
-def safe_div(a, b): return np.where(b > 0, a / b, 0)
+# --- EWMA (Medias Móviles) ---
+def get_ewma(col, span=20):
+    return df_full.groupby('player_name')[col].transform(lambda x: x.shift(1).ewm(span=span, adjust=False).mean()).fillna(0.60) # Default tenis 60%
 
-# Métricas base
-df_full['serve_win_pct'] = safe_div(df_full['stats_1stWon'] + (df_full['stats_SvPt'] - df_full['stats_1stIn'] - df_full['stats_DF']), df_full['stats_SvPt'])
-df_full['return_win_pct'] = 1 - df_full['serve_win_pct'] # Simplificación aproximada válida
-
-# EWMA (Exponential Weighted Moving Average)
-# span=10 significa que los últimos 10 partidos tienen el 86% del peso de la predicción
-def get_ewma(col, span=10):
-    return df_full.groupby('player_name')[col].transform(lambda x: x.shift(1).ewm(span=span, adjust=False).mean()).fillna(0)
-
-df_full['ewma_form'] = get_ewma('result', span=5) # Forma muy reciente (momentum)
-df_full['ewma_serve'] = get_ewma('serve_win_pct', span=20) # Calidad de saque estable
-df_full['ewma_surface'] = df_full.groupby(['player_name', 'Surface'])['result'].transform(
-    lambda x: x.shift(1).ewm(span=15, adjust=False).mean()
-).fillna(df_full['ewma_form'])
+df_full['ewma_form'] = df_full.groupby('player_name')['result'].transform(lambda x: x.shift(1).ewm(span=5).mean()).fillna(0.5)
+df_full['ewma_serve'] = get_ewma('stats_serve', span=30) # Estabilidad al saque
+df_full['ewma_return'] = get_ewma('stats_return', span=30) # Calidad de resto
+df_full['ewma_surface'] = df_full.groupby(['player_name', 'Surface'])['result'].transform(lambda x: x.shift(1).ewm(span=15).mean()).fillna(0.5)
 
 # Fatiga
 df_full['last_match'] = df_full.groupby('player_name')['Date'].shift(1)
@@ -109,10 +99,10 @@ df_full['days_rest'] = (df_full['Date'] - df_full['last_match']).dt.days.fillna(
 cols_final = [
     'Date', 'Surface', 'Best of', 'player_name', 'opponent_name',
     'player_rank', 'player_elo', 'opponent_rank', 'opponent_elo',
-    'ewma_form', 'ewma_serve', 'ewma_surface', 'days_rest',
+    'ewma_form', 'ewma_serve', 'ewma_return', 'ewma_surface', 'days_rest',
     'result', 'total_games'
 ]
 
 df_final = df_full[cols_final].fillna(0)
 df_final.to_csv("atp_matches_procesados.csv", index=False)
-print(f"✅ Datos procesados con EWMA: {len(df_final)} registros.")
+print(f"✅ Datos procesados (Saque/Resto Real): {len(df_final)} registros.")
