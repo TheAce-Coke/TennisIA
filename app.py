@@ -2,29 +2,22 @@ import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
-from datetime import datetime
+from scipy.stats import norm # <--- Necesario para calcular probabilidades O/U
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="NeuralTennis Pro", page_icon="🎾", layout="centered")
 
-# --- ESTILOS CSS PROFESIONALES ---
 st.markdown("""
 <style>
     .stApp { background-color: #0f172a; color: #e2e8f0; }
-    .main-card {
-        background: #1e293b; border-radius: 12px; padding: 24px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        border: 1px solid #334155; margin-bottom: 20px;
-    }
+    .main-card { background: #1e293b; border-radius: 12px; padding: 24px; border: 1px solid #334155; margin-bottom: 20px; }
     .player-header { font-size: 20px; font-weight: bold; color: #f8fafc; text-align: center; }
-    .player-sub { font-size: 12px; color: #94a3b8; text-align: center; margin-bottom: 10px; }
+    .player-sub { font-size: 12px; color: #94a3b8; text-align: center; }
     .vs { font-size: 18px; font-weight: 900; color: #64748b; text-align: center; padding: 10px 0; }
-    .stat-box { background: #0f172a; padding: 10px; border-radius: 8px; text-align: center; }
-    .stat-val { font-size: 18px; font-weight: bold; color: #38bdf8; }
-    .stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; }
     .win-prob { font-size: 42px; font-weight: 800; text-align: center; color: #4ade80; margin: 10px 0; }
-    .bet-box { background: #3b2a1e; border: 1px solid #7c2d12; padding: 15px; border-radius: 8px; margin-top: 15px; }
-    .bet-title { color: #fdba74; font-weight: bold; font-size: 14px; margin-bottom: 5px; }
+    .bet-section { background: #1e293b; padding: 15px; border-radius: 8px; border: 1px solid #475569; margin-top: 10px; }
+    .val-good { color: #4ade80; font-weight: bold; }
+    .val-bad { color: #f87171; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -35,161 +28,155 @@ def load_system():
         m_win = joblib.load('modelo_ganador.joblib')
         m_games = joblib.load('modelo_juegos.joblib')
         feats = joblib.load('features.joblib')
-        # Base de datos reducida solo con lo último de cada jugador
         db = joblib.load('database_reciente.joblib')
-        return m_win, m_games, feats, db
-    except Exception as e:
-        return None, None, None, None
+        # Cargamos la desviación estándar para calcular probabilidades O/U
+        std_g = joblib.load('std_juegos.joblib') 
+        return m_win, m_games, feats, db, std_g
+    except: return None, None, None, None, None
 
-model_win, model_games, features, db = load_system()
+model_win, model_games, features, db, std_games = load_system()
 
 if db is None:
-    st.error("❌ Error: Faltan los modelos. Ejecuta 'entrenar_ia.py' primero.")
+    st.error("❌ Ejecuta 'entrenar_ia.py' de nuevo para generar los archivos de Over/Under.")
     st.stop()
 
-# --- LÓGICA DE EXTRACCIÓN DE PERFIL REAL ---
 def get_last_stats(player_name):
-    # Buscar el registro más reciente de este jugador en la base de datos histórica
     p_data = db[db['player_name'] == player_name].sort_values(by='Date').tail(1)
-    
-    if p_data.empty:
-        return None
-        
+    if p_data.empty: return None
     row = p_data.iloc[0]
     return {
-        'name': player_name,
-        'rank': row['player_rank'],
-        'elo': row['player_elo'],
-        'form': row['player_form_last_5'],
-        'surf_win': row['player_surf_win'],
-        'ace': row['player_ace_avg'],
-        'saved': row['player_bp_save_avg'],
-        'rest': 7 # Default si no hay datos recientes
+        'name': player_name, 'rank': row['player_rank'], 'elo': row['player_elo'],
+        'form': row['player_form_last_5'], 'surf_win': row['player_surf_win'],
+        'ace': row['player_ace_avg'], 'saved': row['player_bp_save_avg'], 'rest': 7
     }
 
-# --- INTERFAZ ---
+# --- UI ---
 st.title("🎾 NeuralTennis Pro")
-st.markdown("Inteligencia Artificial basada en Elo Dinámico y Performance Reciente.")
-
-# Selectores
 all_players = sorted(db['player_name'].unique())
 
 c1, c2 = st.columns(2)
-with c1: p1 = st.selectbox("Jugador 1", all_players, index=all_players.index("Alcaraz C.") if "Alcaraz C." in all_players else 0)
-with c2: p2 = st.selectbox("Jugador 2", all_players, index=all_players.index("Sinner J.") if "Sinner J." in all_players else 1)
-
+with c1: p1 = st.selectbox("J1", all_players, index=0)
+with c2: p2 = st.selectbox("J2", all_players, index=1)
 col_conf1, col_conf2 = st.columns(2)
 with col_conf1: surface = st.selectbox("Superficie", ["Hard", "Clay", "Grass"])
 with col_conf2: best_of = st.selectbox("Sets", [3, 5])
 
-if st.button("🔮 Analizar Partido", type="primary", use_container_width=True):
-    if p1 == p2:
-        st.warning("Selecciona dos jugadores distintos.")
+if st.button("🔮 Analizar Mercados", type="primary", use_container_width=True):
+    if p1 == p2: st.warning("Elige jugadores distintos.")
     else:
-        d1 = get_last_stats(p1)
-        d2 = get_last_stats(p2)
-        
+        d1, d2 = get_last_stats(p1), get_last_stats(p2)
         if d1 and d2:
-            # Preparar Input Vector
-            row = {}
-            # Features básicas
-            row['Best of'] = best_of
-            row['diff_elo'] = d1['elo'] - d2['elo']
-            row['diff_rank'] = d2['rank'] - d1['rank']
-            row['diff_form'] = d1['form'] - d2['form']
-            row['diff_surf'] = d1['surf_win'] - d2['surf_win']
+            # 1. Preparar Datos
+            row = {
+                'Best of': best_of,
+                'diff_elo': d1['elo'] - d2['elo'], 'diff_rank': d2['rank'] - d1['rank'],
+                'diff_form': d1['form'] - d2['form'], 'diff_surf': d1['surf_win'] - d2['surf_win'],
+                'player_elo': d1['elo'], 'opponent_elo': d2['elo'],
+                'player_surf_win': d1['surf_win'], 'opponent_surf_win': d2['surf_win'],
+                'player_ace_avg': d1['ace'], 'opponent_ace_avg': d2['ace'],
+                'days_rest': d1['rest'], 'opponent_rest': d2['rest'],
+                'player_bp_save_avg': d1['saved'], 'opponent_bp_save_avg': d2['saved']
+            }
+            for f in features: 
+                if 'Surface_' in f: row[f] = 1 if f == f'Surface_{surface}' else 0
             
-            row['player_elo'] = d1['elo']
-            row['opponent_elo'] = d2['elo']
-            row['player_surf_win'] = d1['surf_win']
-            row['opponent_surf_win'] = d2['surf_win']
-            row['player_ace_avg'] = d1['ace']
-            row['opponent_ace_avg'] = d2['ace']
-            row['days_rest'] = d1['rest']
-            row['opponent_rest'] = d2['rest']
-            row['player_bp_save_avg'] = d1['saved']
-            row['opponent_bp_save_avg'] = d2['saved']
-            
-            # One Hot Surface
+            X_in = pd.DataFrame([row])
             for f in features:
-                if 'Surface_' in f:
-                    row[f] = 1 if f == f'Surface_{surface}' else 0
+                if f not in X_in.columns: X_in[f] = 0
+            X_in = X_in[features]
 
-            # Crear DataFrame ordenado según el entrenamiento
-            X_input = pd.DataFrame([row])
-            for f in features:
-                if f not in X_input.columns: X_input[f] = 0
-            X_input = X_input[features]
-
-            # Predicción
-            prob_p1 = model_win.predict_proba(X_input)[0][1]
-            pred_games = model_games.predict(X_input)[0]
+            # 2. Predicciones Base
+            prob_p1 = model_win.predict_proba(X_in)[0][1]
+            pred_games = model_games.predict(X_in)[0]
             
             winner = p1 if prob_p1 >= 0.5 else p2
             prob_win = prob_p1 if prob_p1 >= 0.5 else 1 - prob_p1
-            
+
             # --- VISUALIZACIÓN ---
             st.markdown(f"""
             <div class='main-card'>
-                <div style='display:flex; justify-content:space-between; align-items:center;'>
-                    <div style='text-align:center; width:40%;'>
-                        <div class='player-header'>{p1}</div>
-                        <div class='player-sub'>Elo {int(d1['elo'])} | Rank {int(d1['rank'])}</div>
-                    </div>
+                <div style='display:flex; justify-content:space-between;'>
+                    <div style='text-align:center;'><div class='player-header'>{p1}</div><small>Elo {int(d1['elo'])}</small></div>
                     <div class='vs'>VS</div>
-                    <div style='text-align:center; width:40%;'>
-                        <div class='player-header'>{p2}</div>
-                        <div class='player-sub'>Elo {int(d2['elo'])} | Rank {int(d2['rank'])}</div>
-                    </div>
+                    <div style='text-align:center;'><div class='player-header'>{p2}</div><small>Elo {int(d2['elo'])}</small></div>
                 </div>
-                <hr style='border-color: #334155; margin: 20px 0;'>
-                <div style='text-align:center;'>
-                    <div style='color:#94a3b8; font-size:14px;'>Probabilidad de Victoria</div>
+                <div style='text-align:center; margin-top:10px;'>
                     <div class='win-prob'>{winner} {prob_win*100:.1f}%</div>
-                    <div style='color:#cbd5e1; margin-top:5px;'>Cuota Real Justa: <b>{1/prob_win:.2f}</b></div>
+                    <small>Juegos Estimados: <b>{pred_games:.1f}</b> (±{std_games:.1f})</small>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            
-            # Calculadora de Valor
-            with st.expander("💰 Calculadora de Valor (Apuestas)", expanded=True):
-                col_odds, col_res = st.columns([1, 2])
-                with col_odds:
-                    odds_bookie = st.number_input(f"Cuota Casa para {winner}", value=1.85, step=0.05)
-                with col_res:
-                    implied_prob = 1 / odds_bookie
-                    edge = prob_win - implied_prob
-                    st.write(f"Prob. Casa: {implied_prob*100:.1f}% vs IA: {prob_win*100:.1f}%")
-                    if edge > 0.03: # 3% de margen de seguridad
-                        st.markdown(f"<div style='color:#4ade80; font-weight:bold;'>✅ VALOR DETECTADO (+{edge*100:.1f}%)</div>", unsafe_allow_html=True)
-                        st.write("La cuota es más alta de lo que debería. Oportunidad matemática.")
-                    else:
-                        st.markdown(f"<div style='color:#f87171; font-weight:bold;'>❌ SIN VALOR ({edge*100:.1f}%)</div>", unsafe_allow_html=True)
-                        st.write("La casa paga poco para el riesgo real.")
 
-            # Estadísticas Comparativas
-            st.write("### 📊 Comparativa Técnica")
-            
-            def stat_row(label, v1, v2, is_pct=True):
-                fmt = "{:.1%}" if is_pct else "{:.0f}"
-                c1, c2, c3 = st.columns([3, 6, 3])
-                c1.markdown(f"<div style='text-align:right; font-weight:bold;'>{fmt.format(v1)}</div>", unsafe_allow_html=True)
-                with c2:
-                    # Normalizar para la barra (max relativo)
-                    m = max(v1, v2) if max(v1, v2) > 0 else 1
-                    v1_n = v1 / m
-                    v2_n = v2 / m
-                    st.progress(v1_n) # Streamlit progress es simple, solo izquierda a derecha
-                    # Truco visual simple: Nombre del stat al centro
-                    st.markdown(f"<div style='text-align:center; font-size:10px; margin-top:-15px; color:#ccc;'>{label}</div>", unsafe_allow_html=True)
-                c3.markdown(f"<div style='text-align:left; font-weight:bold;'>{fmt.format(v2)}</div>", unsafe_allow_html=True)
+            # === CALCULADORAS DE APUESTAS ===
+            t1, t2, t3 = st.tabs(["🏆 Ganador", "🔢 Over/Under", "🏁 Hándicap"])
 
-            stat_row("Efectividad Superficie", d1['surf_win'], d2['surf_win'])
-            stat_row("Forma Reciente (Win Rate)", d1['form'], d2['form'])
-            stat_row("Presión Saque (Aces)", d1['ace'], d2['ace'])
-            stat_row("Resistencia Mental (BP Saved)", d1['saved'], d2['saved'])
-            
-            st.info(f"🎾 **Juegos Totales Estimados:** {pred_games:.1f} juegos")
-            
-        else:
-            st.error("Datos insuficientes para generar predicción fiable para estos jugadores.")
+            # TAB 1: GANADOR
+            with t1:
+                st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
+                c_odd, c_res = st.columns([1, 2])
+                with c_odd: odd_val = st.number_input(f"Cuota {winner}", value=1.50, step=0.05)
+                with c_res:
+                    implied = 1/odd_val
+                    edge = prob_win - implied
+                    st.write(f"Prob. Real: **{prob_win*100:.1f}%** | Prob. Casa: **{implied*100:.1f}%**")
+                    if edge > 0.02: st.markdown(f"<div class='val-good'>✅ VALOR: +{edge*100:.1f}%</div>", unsafe_allow_html=True)
+                    else: st.markdown(f"<div class='val-bad'>❌ SIN VALOR ({edge*100:.1f}%)</div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # TAB 2: OVER/UNDER (NUEVO Y POTENTE)
+            with t2:
+                st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
+                st.info(f"🧠 La IA predice **{pred_games:.1f}** juegos. Calculando probabilidades usando campana de Gauss...")
+                
+                col_line, col_odd_ou = st.columns(2)
+                with col_line: line_ou = st.number_input("Línea Juegos (ej: 22.5)", value=float(int(pred_games)), step=0.5)
+                with col_odd_ou: odd_ou = st.number_input("Cuota Over", value=1.85, step=0.05)
+                
+                # --- MATEMÁTICA GAUSSIANA ---
+                # Z-Score = (Línea - Predicción) / Desviación
+                # Prob Over = 1 - CDF(Z)
+                z_score = (line_ou - pred_games) / std_games
+                prob_under = norm.cdf(z_score)
+                prob_over = 1 - prob_under
+                
+                col_res_over, col_res_under = st.columns(2)
+                
+                # Análisis OVER
+                with col_res_over:
+                    st.write(f"**OVER {line_ou}**")
+                    st.write(f"Prob: **{prob_over*100:.1f}%**")
+                    fair_odd_over = 1/prob_over if prob_over > 0 else 99
+                    st.write(f"Cuota Justa: {fair_odd_over:.2f}")
+                    
+                    edge_over = prob_over - (1/odd_ou)
+                    if edge_over > 0.02: st.markdown(f"<span class='val-good'>✅ VALOR</span>", unsafe_allow_html=True)
+                    else: st.markdown(f"<span class='val-bad'>❌ NO ENTRAR</span>", unsafe_allow_html=True)
+
+                # Análisis UNDER
+                with col_res_under:
+                    st.write(f"**UNDER {line_ou}**")
+                    st.write(f"Prob: **{prob_under*100:.1f}%**")
+                    fair_odd_under = 1/prob_under if prob_under > 0 else 99
+                    st.write(f"Cuota Justa: {fair_odd_under:.2f}")
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # TAB 3: HÁNDICAP (ESTIMADO)
+            with t3:
+                st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
+                # Estimación simple: Si P1 tiene 80% de ganar, se espera un hándicap negativo
+                expected_diff = (prob_p1 - 0.5) * 8 # Factor empírico aproximado
+                st.write(f"Diferencia de juegos esperada: **{expected_diff:.1f}** para {p1}")
+                
+                h_line = st.number_input(f"Hándicap {p1} (ej: -3.5)", value=-2.5, step=0.5)
+                
+                # Lógica difusa para probabilidad de hándicap
+                # Usamos una sigmoide ajustada basada en la diferencia esperada vs línea
+                dist = expected_diff - h_line # Si espero ganar por 4 y la línea es -2.5, dist = 1.5 (bueno)
+                prob_cover = 1 / (1 + np.exp(-0.5 * dist)) # Función sigmoide suave
+                
+                st.write(f"Probabilidad de cubrir {h_line}: **{prob_cover*100:.1f}%**")
+                st.caption("Nota: El hándicap es una estimación experimental basada en la probabilidad de victoria.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        else: st.error("Faltan datos.")
