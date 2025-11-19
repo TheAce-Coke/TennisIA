@@ -1,221 +1,195 @@
 import streamlit as st
 import pandas as pd
 import joblib
-import os
 import numpy as np
+from datetime import datetime
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="NeuralTennis AI", page_icon="🎾", layout="wide")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="NeuralTennis Pro", page_icon="🎾", layout="centered")
 
-# --- ESTILOS CSS AVANZADOS ---
+# --- ESTILOS CSS PROFESIONALES ---
 st.markdown("""
 <style>
-    .stApp { background-color: #0e1117; }
-    .player-card {
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 15px;
-        padding: 20px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-        transition: transform 0.3s ease;
+    .stApp { background-color: #0f172a; color: #e2e8f0; }
+    .main-card {
+        background: #1e293b; border-radius: 12px; padding: 24px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        border: 1px solid #334155; margin-bottom: 20px;
     }
-    .player-card:hover {
-        transform: translateY(-5px);
-        border: 1px solid rgba(255, 255, 255, 0.3);
-    }
-    .player-name { font-size: 22px; font-weight: 700; color: #ffffff; margin-bottom: 5px; }
-    .player-rank {
-        font-size: 14px; color: #a0a0a0; text-transform: uppercase; letter-spacing: 1px;
-        background: rgba(0,0,0,0.3); padding: 4px 10px; border-radius: 20px; display: inline-block;
-    }
-    .vs-badge {
-        font-size: 24px; font-weight: 900; color: #ff4b4b; text-align: center;
-        margin-top: 40px; text-shadow: 0 0 10px rgba(255, 75, 75, 0.5);
-    }
-    .prob-box {
-        text-align: center; padding: 20px; margin-top: 20px;
-        background: linear-gradient(180deg, rgba(30,30,30,0) 0%, rgba(30,30,30,0.5) 100%);
-        border-radius: 15px;
-    }
-    .prob-percent { font-size: 48px; font-weight: 800; font-family: 'Helvetica Neue', sans-serif; }
-    .winner-green { color: #00cc66; text-shadow: 0 0 15px rgba(0, 204, 102, 0.4); }
-    .loser-red { color: #ff4b4b; opacity: 0.7; }
-    .stat-row { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 14px; color: #ccc; }
+    .player-header { font-size: 20px; font-weight: bold; color: #f8fafc; text-align: center; }
+    .player-sub { font-size: 12px; color: #94a3b8; text-align: center; margin-bottom: 10px; }
+    .vs { font-size: 18px; font-weight: 900; color: #64748b; text-align: center; padding: 10px 0; }
+    .stat-box { background: #0f172a; padding: 10px; border-radius: 8px; text-align: center; }
+    .stat-val { font-size: 18px; font-weight: bold; color: #38bdf8; }
+    .stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; }
+    .win-prob { font-size: 42px; font-weight: 800; text-align: center; color: #4ade80; margin: 10px 0; }
+    .bet-box { background: #3b2a1e; border: 1px solid #7c2d12; padding: 15px; border-radius: 8px; margin-top: 15px; }
+    .bet-title { color: #fdba74; font-weight: bold; font-size: 14px; margin-bottom: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- CARGA ROBUSTA ---
+# --- CARGA ---
 @st.cache_resource
-def cargar_cerebro():
+def load_system():
     try:
-        if os.path.exists('features.joblib'): feats = joblib.load('features.joblib')
-        elif os.path.exists('features_ganador.joblib'): feats = joblib.load('features_ganador.joblib')
-        else: return None
-
-        if not os.path.exists('modelo_ganador.joblib'): return None
         m_win = joblib.load('modelo_ganador.joblib')
         m_games = joblib.load('modelo_juegos.joblib')
-        
-        df = pd.read_csv("atp_matches_procesados.csv")
-        
-        # --- PARCHES DE COMPATIBILIDAD (Aquí estaba el fallo) ---
-        # 1. Fecha
-        if 'tourney_date' in df.columns: df.rename(columns={'tourney_date': 'Date'}, inplace=True)
-        # 2. Nombres
-        if 'player_name' not in df.columns and 'Player_1' in df.columns:
-             df.rename(columns={'Player_1': 'player_name', 'Player_2': 'opponent_name'}, inplace=True)
-        # 3. SUPERFICIE (¡Corrección Nueva!)
-        if 'surface' in df.columns: df.rename(columns={'surface': 'Surface'}, inplace=True)
-        # -------------------------------------------------------
+        feats = joblib.load('features.joblib')
+        # Base de datos reducida solo con lo último de cada jugador
+        db = joblib.load('database_reciente.joblib')
+        return m_win, m_games, feats, db
+    except Exception as e:
+        return None, None, None, None
 
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'])
-            df = df.sort_values(by='Date')
-        return m_win, m_games, feats, df
-    except: return None
+model_win, model_games, features, db = load_system()
 
-sistema = cargar_cerebro()
-if not sistema:
-    st.error("⚠️ Error de sistema: Faltan archivos en el repositorio.")
+if db is None:
+    st.error("❌ Error: Faltan los modelos. Ejecuta 'entrenar_ia.py' primero.")
     st.stop()
 
-model_win, model_games, feats, df = sistema
+# --- LÓGICA DE EXTRACCIÓN DE PERFIL REAL ---
+def get_last_stats(player_name):
+    # Buscar el registro más reciente de este jugador en la base de datos histórica
+    p_data = db[db['player_name'] == player_name].sort_values(by='Date').tail(1)
+    
+    if p_data.empty:
+        return None
+        
+    row = p_data.iloc[0]
+    return {
+        'name': player_name,
+        'rank': row['player_rank'],
+        'elo': row['player_elo'],
+        'form': row['player_form_last_5'],
+        'surf_win': row['player_surf_win'],
+        'ace': row['player_ace_avg'],
+        'saved': row['player_bp_save_avg'],
+        'rest': 7 # Default si no hay datos recientes
+    }
 
-# --- LÓGICA DE PERFILADO ---
-def get_smart_profile(player_name, surface_filter):
-    col_p = 'player_name' if 'player_name' in df.columns else 'Player_1'
-    matches = df[df[col_p] == player_name].copy()
-    if matches.empty: return None
-    
-    last_15 = matches.tail(15)
-    
-    stats = {}
-    stats['player_rank'] = last_15.iloc[-1]['player_rank']
-    if pd.isna(stats['player_rank']): stats['player_rank'] = 500
-    
-    cols_tech = ['player_ace_avg', 'player_1st_won_avg', 'player_bp_save_avg', 'player_form']
-    for c in cols_tech:
-        if c in last_15.columns:
-            val = last_15[last_15[c] > 0.01][c].mean()
-            stats[c] = val if not pd.isna(val) else 0
-        else: stats[c] = 0
+# --- INTERFAZ ---
+st.title("🎾 NeuralTennis Pro")
+st.markdown("Inteligencia Artificial basada en Elo Dinámico y Performance Reciente.")
 
-    # Corrección superficie segura
-    if 'Surface' in matches.columns:
-        surf_matches = matches[matches['Surface'] == surface_filter]
-        if not surf_matches.empty and len(surf_matches) > 2:
-            stats['player_surf_win'] = surf_matches.tail(10)['result'].mean()
-        else:
-            stats['player_surf_win'] = stats['player_form'] * 0.85
+# Selectores
+all_players = sorted(db['player_name'].unique())
+
+c1, c2 = st.columns(2)
+with c1: p1 = st.selectbox("Jugador 1", all_players, index=all_players.index("Alcaraz C.") if "Alcaraz C." in all_players else 0)
+with c2: p2 = st.selectbox("Jugador 2", all_players, index=all_players.index("Sinner J.") if "Sinner J." in all_players else 1)
+
+col_conf1, col_conf2 = st.columns(2)
+with col_conf1: surface = st.selectbox("Superficie", ["Hard", "Clay", "Grass"])
+with col_conf2: best_of = st.selectbox("Sets", [3, 5])
+
+if st.button("🔮 Analizar Partido", type="primary", use_container_width=True):
+    if p1 == p2:
+        st.warning("Selecciona dos jugadores distintos.")
     else:
-        stats['player_surf_win'] = 0.5 # Default si falla columna
-
-    return stats
-
-def imputar_logica_ranking(stats):
-    r = stats['player_rank']
-    if r <= 30:   base = {'1st': 0.75, 'bp': 0.64, 'ace': 0.09, 'form': 0.65}
-    elif r <= 100: base = {'1st': 0.70, 'bp': 0.60, 'ace': 0.06, 'form': 0.55}
-    else:          base = {'1st': 0.64, 'bp': 0.55, 'ace': 0.04, 'form': 0.48}
-
-    if stats['player_1st_won_avg'] < 0.4: stats['player_1st_won_avg'] = base['1st']
-    if stats['player_bp_save_avg'] < 0.3: stats['player_bp_save_avg'] = base['bp']
-    if stats['player_ace_avg'] == 0:      stats['player_ace_avg'] = base['ace']
-    if stats['player_form'] == 0:         stats['player_form'] = base['form']
-    return stats
-
-# --- UI PRINCIPAL ---
-with st.sidebar:
-    st.header("🎛️ Centro de Control")
-    col_p = 'player_name' if 'player_name' in df.columns else 'Player_1'
-    all_p = sorted(list(set(df[col_p].unique())))
-    
-    p1 = st.selectbox("Jugador 1", all_p, index=None, placeholder="Seleccionar...")
-    p2 = st.selectbox("Jugador 2", all_p, index=None, placeholder="Seleccionar...")
-    st.markdown("---")
-    surf = st.selectbox("Pista", ["Hard", "Clay", "Grass"])
-    bo = st.selectbox("Sets", [3, 5])
-    
-    r1_val, r2_val = 500, 500
-    if p1 and p2:
-        s1_pre = get_smart_profile(p1, surf)
-        s2_pre = get_smart_profile(p2, surf)
-        if s1_pre: r1_val = int(s1_pre['player_rank'])
-        if s2_pre: r2_val = int(s2_pre['player_rank'])
-
-    rank1 = st.number_input("Rank J1", value=r1_val)
-    rank2 = st.number_input("Rank J2", value=r2_val)
-    analizar = st.button("🚀 ANALIZAR", type="primary", use_container_width=True)
-
-# --- PANTALLA PRINCIPAL ---
-st.markdown("<h1 style='text-align: center; margin-bottom: 40px;'>🎾 NEURAL TENNIS <span style='color:#58a6ff; font-size: 20px;'>v6.1</span></h1>", unsafe_allow_html=True)
-
-if analizar and p1 and p2 and p1 != p2:
-    prof1 = get_smart_profile(p1, surf)
-    prof2 = get_smart_profile(p2, surf)
-    
-    if prof1 and prof2:
-        prof1['player_rank'] = rank1
-        prof2['player_rank'] = rank2
-        prof1 = imputar_logica_ranking(prof1)
-        prof2 = imputar_logica_ranking(prof2)
+        d1 = get_last_stats(p1)
+        d2 = get_last_stats(p2)
         
-        h2h_df = df[(df[col_p] == p1) & (df['opponent_name' if 'opponent_name' in df.columns else 'Player_2'] == p2)]
-        h2h_w = len(h2h_df[h2h_df['result']==1]) if 'result' in h2h_df.columns else len(h2h_df)
-        
-        row = {
-            'player_rank': rank1, 'opponent_rank': rank2, 'Best of': bo,
-            'player_form': prof1['player_form'], 'opponent_form': prof2['player_form'],
-            'h2h_wins': h2h_w, 'h2h_total': len(h2h_df),
-            'player_surf_win': prof1['player_surf_win'], 'opponent_surf_win': prof2['player_surf_win'],
-            'player_ace_avg': prof1['player_ace_avg'], 'opponent_ace_avg': prof2['player_ace_avg'],
-            'player_1st_won_avg': prof1['player_1st_won_avg'], 'opponent_1st_won_avg': prof2['player_1st_won_avg'],
-            'player_bp_save_avg': prof1['player_bp_save_avg'], 'opponent_bp_save_avg': prof2['player_bp_save_avg']
-        }
-        
-        for f in feats: 
-            if 'Surface_' in f: row[f] = 1 if f == f'Surface_{surf}' else 0
+        if d1 and d2:
+            # Preparar Input Vector
+            row = {}
+            # Features básicas
+            row['Best of'] = best_of
+            row['diff_elo'] = d1['elo'] - d2['elo']
+            row['diff_rank'] = d2['rank'] - d1['rank']
+            row['diff_form'] = d1['form'] - d2['form']
+            row['diff_surf'] = d1['surf_win'] - d2['surf_win']
             
-        X_in = pd.DataFrame([row])
-        for c in feats:
-            if c not in X_in.columns: X_in[c] = 0
-        X_in = X_in[feats]
-
-        prob_p1 = model_win.predict_proba(X_in)[0][1]
-        games_pred = model_games.predict(X_in)[0]
-        
-        c1, c2, c3 = st.columns([4, 1, 4])
-        with c1:
-            st.markdown(f"<div class='player-card'><div class='player-name'>{p1}</div><div class='player-rank'>RANK #{rank1}</div></div>", unsafe_allow_html=True)
-        with c2: st.markdown("<div class='vs-badge'>VS</div>", unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"<div class='player-card'><div class='player-name'>{p2}</div><div class='player-rank'>RANK #{rank2}</div></div>", unsafe_allow_html=True)
+            row['player_elo'] = d1['elo']
+            row['opponent_elo'] = d2['elo']
+            row['player_surf_win'] = d1['surf_win']
+            row['opponent_surf_win'] = d2['surf_win']
+            row['player_ace_avg'] = d1['ace']
+            row['opponent_ace_avg'] = d2['ace']
+            row['days_rest'] = d1['rest']
+            row['opponent_rest'] = d2['rest']
+            row['player_bp_save_avg'] = d1['saved']
+            row['opponent_bp_save_avg'] = d2['saved']
             
-        st.markdown("<div class='prob-box'>", unsafe_allow_html=True)
-        if prob_p1 > 0.5:
-            st.markdown(f"<div class='prob-percent winner-green'>{prob_p1*100:.1f}%</div><div>Victoria estimada: <b>{p1}</b></div>", unsafe_allow_html=True)
-            if prob_p1 > 0.55: st.success(f"💎 PICK: {p1} (Cuota > {1/prob_p1:.2f})")
+            # One Hot Surface
+            for f in features:
+                if 'Surface_' in f:
+                    row[f] = 1 if f == f'Surface_{surface}' else 0
+
+            # Crear DataFrame ordenado según el entrenamiento
+            X_input = pd.DataFrame([row])
+            for f in features:
+                if f not in X_input.columns: X_input[f] = 0
+            X_input = X_input[features]
+
+            # Predicción
+            prob_p1 = model_win.predict_proba(X_input)[0][1]
+            pred_games = model_games.predict(X_input)[0]
+            
+            winner = p1 if prob_p1 >= 0.5 else p2
+            prob_win = prob_p1 if prob_p1 >= 0.5 else 1 - prob_p1
+            
+            # --- VISUALIZACIÓN ---
+            st.markdown(f"""
+            <div class='main-card'>
+                <div style='display:flex; justify-content:space-between; align-items:center;'>
+                    <div style='text-align:center; width:40%;'>
+                        <div class='player-header'>{p1}</div>
+                        <div class='player-sub'>Elo {int(d1['elo'])} | Rank {int(d1['rank'])}</div>
+                    </div>
+                    <div class='vs'>VS</div>
+                    <div style='text-align:center; width:40%;'>
+                        <div class='player-header'>{p2}</div>
+                        <div class='player-sub'>Elo {int(d2['elo'])} | Rank {int(d2['rank'])}</div>
+                    </div>
+                </div>
+                <hr style='border-color: #334155; margin: 20px 0;'>
+                <div style='text-align:center;'>
+                    <div style='color:#94a3b8; font-size:14px;'>Probabilidad de Victoria</div>
+                    <div class='win-prob'>{winner} {prob_win*100:.1f}%</div>
+                    <div style='color:#cbd5e1; margin-top:5px;'>Cuota Real Justa: <b>{1/prob_win:.2f}</b></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Calculadora de Valor
+            with st.expander("💰 Calculadora de Valor (Apuestas)", expanded=True):
+                col_odds, col_res = st.columns([1, 2])
+                with col_odds:
+                    odds_bookie = st.number_input(f"Cuota Casa para {winner}", value=1.85, step=0.05)
+                with col_res:
+                    implied_prob = 1 / odds_bookie
+                    edge = prob_win - implied_prob
+                    st.write(f"Prob. Casa: {implied_prob*100:.1f}% vs IA: {prob_win*100:.1f}%")
+                    if edge > 0.03: # 3% de margen de seguridad
+                        st.markdown(f"<div style='color:#4ade80; font-weight:bold;'>✅ VALOR DETECTADO (+{edge*100:.1f}%)</div>", unsafe_allow_html=True)
+                        st.write("La cuota es más alta de lo que debería. Oportunidad matemática.")
+                    else:
+                        st.markdown(f"<div style='color:#f87171; font-weight:bold;'>❌ SIN VALOR ({edge*100:.1f}%)</div>", unsafe_allow_html=True)
+                        st.write("La casa paga poco para el riesgo real.")
+
+            # Estadísticas Comparativas
+            st.write("### 📊 Comparativa Técnica")
+            
+            def stat_row(label, v1, v2, is_pct=True):
+                fmt = "{:.1%}" if is_pct else "{:.0f}"
+                c1, c2, c3 = st.columns([3, 6, 3])
+                c1.markdown(f"<div style='text-align:right; font-weight:bold;'>{fmt.format(v1)}</div>", unsafe_allow_html=True)
+                with c2:
+                    # Normalizar para la barra (max relativo)
+                    m = max(v1, v2) if max(v1, v2) > 0 else 1
+                    v1_n = v1 / m
+                    v2_n = v2 / m
+                    st.progress(v1_n) # Streamlit progress es simple, solo izquierda a derecha
+                    # Truco visual simple: Nombre del stat al centro
+                    st.markdown(f"<div style='text-align:center; font-size:10px; margin-top:-15px; color:#ccc;'>{label}</div>", unsafe_allow_html=True)
+                c3.markdown(f"<div style='text-align:left; font-weight:bold;'>{fmt.format(v2)}</div>", unsafe_allow_html=True)
+
+            stat_row("Efectividad Superficie", d1['surf_win'], d2['surf_win'])
+            stat_row("Forma Reciente (Win Rate)", d1['form'], d2['form'])
+            stat_row("Presión Saque (Aces)", d1['ace'], d2['ace'])
+            stat_row("Resistencia Mental (BP Saved)", d1['saved'], d2['saved'])
+            
+            st.info(f"🎾 **Juegos Totales Estimados:** {pred_games:.1f} juegos")
+            
         else:
-            st.markdown(f"<div class='prob-percent winner-green'>{((1-prob_p1)*100):.1f}%</div><div>Victoria estimada: <b>{p2}</b></div>", unsafe_allow_html=True)
-            if prob_p1 < 0.45: st.success(f"💎 PICK: {p2} (Cuota > {1/(1-prob_p1):.2f})")
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        st.write("### 📊 Estadísticas")
-        def barra(l, v1, v2):
-            col = "#58a6ff" if v1 >= v2 else "#8b949e"
-            st.write(f"**{l}**")
-            cols = st.columns([1, 4, 1])
-            cols[0].write(f"{v1:.1%}")
-            tot = v1+v2
-            cols[1].progress(int((v1/tot)*100) if tot>0 else 50)
-            cols[2].write(f"{v2:.1%}")
-
-        barra("Saque (1st Won)", prof1['player_1st_won_avg'], prof2['player_1st_won_avg'])
-        barra("Mental (BP Saved)", prof1['player_bp_save_avg'], prof2['player_bp_save_avg'])
-        barra("Superficie", prof1['player_surf_win'], prof2['player_surf_win'])
-        st.info(f"🎾 Duración: **{games_pred:.1f} juegos**")
-
-    else: st.error("Datos insuficientes.")
-elif not analizar:
-    st.markdown("<div style='text-align:center; margin-top: 50px; color:#666;'>Selecciona jugadores para comenzar</div>", unsafe_allow_html=True)
+            st.error("Datos insuficientes para generar predicción fiable para estos jugadores.")
