@@ -9,4 +9,4 @@ lxml
 scipy
 plotly
 matplotlib
-nba_api
+kaggle
