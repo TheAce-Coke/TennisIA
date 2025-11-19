@@ -2,177 +2,218 @@ import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
-from scipy.stats import norm
+import random
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="NeuralTennis Pro", page_icon="🎾", layout="centered")
-
+# --- CONFIGURACIÓN PRO ---
+st.set_page_config(page_title="QuantTennis AI", page_icon="🎾", layout="wide")
 st.markdown("""
 <style>
-    .stApp { background-color: #0f172a; color: #e2e8f0; }
-    .main-card { background: #1e293b; border-radius: 12px; padding: 24px; border: 1px solid #334155; margin-bottom: 20px; }
-    .player-header { font-size: 20px; font-weight: bold; color: #f8fafc; text-align: center; }
-    .player-sub { font-size: 12px; color: #94a3b8; text-align: center; }
-    .vs { font-size: 18px; font-weight: 900; color: #64748b; text-align: center; padding: 10px 0; }
-    .win-prob { font-size: 42px; font-weight: 800; text-align: center; color: #4ade80; margin: 10px 0; }
-    .bet-section { background: #1e293b; padding: 15px; border-radius: 8px; border: 1px solid #475569; margin-top: 10px; }
-    .val-good { color: #4ade80; font-weight: bold; }
-    .val-bad { color: #f87171; font-weight: bold; }
+    .stApp { background-color: #0e1117; }
+    .metric-card { background: #1e2329; padding: 15px; border-radius: 10px; border: 1px solid #2d333b; text-align: center; }
+    .big-number { font-size: 24px; font-weight: bold; color: #58a6ff; }
+    .sub-text { font-size: 12px; color: #8b949e; }
+    .win-green { color: #3fb950; font-weight: bold; }
+    .loss-red { color: #f85149; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- CARGA ---
 @st.cache_resource
-def load_system():
+def load_data():
     try:
-        m_win = joblib.load('modelo_ganador.joblib')
-        m_games = joblib.load('modelo_juegos.joblib')
+        model = joblib.load('modelo_calibrado.joblib')
         feats = joblib.load('features.joblib')
-        db = joblib.load('database_reciente.joblib')
-        std_g = joblib.load('std_juegos.joblib') 
-        return m_win, m_games, feats, db, std_g
-    except: return None, None, None, None, None
+        db = joblib.load('db_players.joblib')
+        return model, feats, db
+    except: return None, None, None
 
-model_win, model_games, features, db, std_games = load_system()
+model, features, db = load_data()
 
-if db is None:
-    st.error("❌ Ejecuta 'entrenar_ia.py' de nuevo para generar los archivos necesarios.")
+if not model:
+    st.error("❌ Error: Ejecuta entrenar_ia.py primero.")
     st.stop()
 
-def get_last_stats(player_name):
-    p_data = db[db['player_name'] == player_name].sort_values(by='Date').tail(1)
-    if p_data.empty: return None
-    row = p_data.iloc[0]
-    return {
-        'name': player_name, 'rank': row['player_rank'], 'elo': row['player_elo'],
-        'form': row['player_form_last_5'], 'surf_win': row['player_surf_win'],
-        'ace': row['player_ace_avg'], 'saved': row['player_bp_save_avg'], 'rest': 7
-    }
+# --- MOTOR DE SIMULACIÓN MONTE CARLO (TENIS REAL) ---
+def sim_game(p_serve):
+    # Simula un juego de tenis simple basado en prob de ganar punto al saque
+    pts_server, pts_receiver = 0, 0
+    while True:
+        if random.random() < p_serve: pts_server += 1
+        else: pts_receiver += 1
+        
+        if pts_server >= 4 and pts_server >= pts_receiver + 2: return 1, pts_server + pts_receiver # Gana server
+        if pts_receiver >= 4 and pts_receiver >= pts_server + 2: return 0, pts_server + pts_receiver # Gana receiver
+
+def sim_set(p1_serve_prob, p2_serve_prob):
+    g1, g2 = 0, 0
+    total_pts = 0
+    # Tiebreak a los 6-6
+    while g1 < 6 and g2 < 6:
+        # Turno saque P1
+        w, pts = sim_game(p1_serve_prob)
+        if w: g1 += 1
+        total_pts += pts
+        if g1 == 6 and g2 < 5: return g1, g2, total_pts
+        
+        # Turno saque P2
+        w, pts = sim_game(p2_serve_prob)
+        if not w: g2 += 1 # Gana P2
+        else: g1 += 1 # Break de P1 (gana receiver)
+        total_pts += pts
+        if g2 == 6 and g1 < 5: return g1, g2, total_pts
+
+    # Tiebreak logic simplificada (quien llegue a 7 con dif de 2)
+    # Asumimos prob promedio en tiebreak
+    tb1, tb2 = 0, 0
+    while True:
+        if random.random() < 0.5: tb1 += 1 # Simplificado 50/50 en TB ajustado por skill
+        else: tb2 += 1
+        if (tb1 >= 7 and tb1 >= tb2+2): return 7, 6, total_pts + tb1 + tb2
+        if (tb2 >= 7 and tb2 >= tb1+2): return 6, 7, total_pts + tb1 + tb2
+
+def monte_carlo_match(p1_serve, p2_serve, best_of=3, sims=2000):
+    results = []
+    
+    for _ in range(sims):
+        sets_p1, sets_p2 = 0, 0
+        games_p1, games_p2 = 0, 0
+        match_games = 0
+        
+        needed = 2 if best_of == 3 else 3
+        
+        while sets_p1 < needed and sets_p2 < needed:
+            s1, s2, pts = sim_set(p1_serve, p2_serve)
+            games_p1 += s1
+            games_p2 += s2
+            match_games += (s1 + s2)
+            
+            if s1 > s2: sets_p1 += 1
+            else: sets_p2 += 1
+            
+        results.append({
+            'winner': 1 if sets_p1 > sets_p2 else 2,
+            'total_games': match_games,
+            'diff_games': games_p1 - games_p2, # Para handicap
+            'score': f"{sets_p1}-{sets_p2}"
+        })
+        
+    return pd.DataFrame(results)
 
 # --- UI ---
-st.title("🎾 NeuralTennis Pro")
-all_players = sorted(db['player_name'].unique())
+col1, col2 = st.columns([1, 3])
 
-# === GESTIÓN DE ESTADO (LA SOLUCIÓN) ===
-if 'analisis_activo' not in st.session_state:
-    st.session_state.analisis_activo = False
+with col1:
+    st.subheader("⚙️ Configuración")
+    players = sorted(db['player_name'].unique())
+    p1_name = st.selectbox("Jugador 1", players, index=0)
+    p2_name = st.selectbox("Jugador 2", players, index=1)
+    surface = st.selectbox("Superficie", ["Hard", "Clay", "Grass"])
+    best_of = st.selectbox("Sets", [3, 5])
+    
+    analyze = st.button("🚀 EJECUTAR SIMULACIÓN", type="primary", use_container_width=True)
 
-# Si cambiamos de jugadores, reseteamos el análisis para no mostrar datos antiguos
-def resetear_analisis():
-    st.session_state.analisis_activo = False
-
-c1, c2 = st.columns(2)
-# Añadimos on_change para resetear si cambias de jugador
-with c1: p1 = st.selectbox("J1", all_players, index=0, on_change=resetear_analisis)
-with c2: p2 = st.selectbox("J2", all_players, index=1, on_change=resetear_analisis)
-
-col_conf1, col_conf2 = st.columns(2)
-with col_conf1: surface = st.selectbox("Superficie", ["Hard", "Clay", "Grass"], on_change=resetear_analisis)
-with col_conf2: best_of = st.selectbox("Sets", [3, 5], on_change=resetear_analisis)
-
-# BOTÓN: Al hacer click, activamos el estado persistente
-if st.button("🔮 Analizar Mercados", type="primary", use_container_width=True):
-    st.session_state.analisis_activo = True
-
-# LÓGICA PRINCIPAL (Ahora depende del estado, no del botón directamente)
-if st.session_state.analisis_activo:
-    if p1 == p2: st.warning("Elige jugadores distintos.")
-    else:
-        d1, d2 = get_last_stats(p1), get_last_stats(p2)
-        if d1 and d2:
-            # 1. Preparar Datos
-            row = {
-                'Best of': best_of,
-                'diff_elo': d1['elo'] - d2['elo'], 'diff_rank': d2['rank'] - d1['rank'],
-                'diff_form': d1['form'] - d2['form'], 'diff_surf': d1['surf_win'] - d2['surf_win'],
-                'player_elo': d1['elo'], 'opponent_elo': d2['elo'],
-                'player_surf_win': d1['surf_win'], 'opponent_surf_win': d2['surf_win'],
-                'player_ace_avg': d1['ace'], 'opponent_ace_avg': d2['ace'],
-                'days_rest': d1['rest'], 'opponent_rest': d2['rest'],
-                'player_bp_save_avg': d1['saved'], 'opponent_bp_save_avg': d2['saved']
-            }
-            for f in features: 
-                if 'Surface_' in f: row[f] = 1 if f == f'Surface_{surface}' else 0
+with col2:
+    st.title("🎾 QuantTennis: Monte Carlo Engine")
+    
+    if analyze and p1_name != p2_name:
+        # 1. Obtener Datos
+        d1 = db[db['player_name'] == p1_name].iloc[0]
+        d2 = db[db['player_name'] == p2_name].iloc[0]
+        
+        # 2. Feature Vector para el modelo base
+        # (Necesitamos saber la probabilidad base de victoria para derivar el saque)
+        row = {
+            'Best of': best_of,
+            'delta_elo': d1['player_elo'] - d2['player_elo'],
+            'delta_form': d1['ewma_form'] - d2['ewma_form'],
+            'delta_serve': d1['ewma_serve'] - d2['ewma_serve'],
+            'delta_surf': d1['ewma_surface'] - d2['ewma_surface'],
+            'player_elo': d1['player_elo'], 'opponent_elo': d2['player_elo'],
+            'ewma_serve': d1['ewma_serve'], 'opp_ewma_serve': d2['ewma_serve'],
+            'days_rest': 10, 'opp_days_rest': 10 # Default
+        }
+        for f in features: 
+            if 'Surface_' in f: row[f] = 1 if f == f'Surface_{surface}' else 0
             
-            X_in = pd.DataFrame([row])
-            for f in features:
-                if f not in X_in.columns: X_in[f] = 0
-            X_in = X_in[features]
-
-            # 2. Predicciones
-            prob_p1 = model_win.predict_proba(X_in)[0][1]
-            pred_games = model_games.predict(X_in)[0]
+        X = pd.DataFrame([row])[features]
+        
+        # 3. Probabilidad General (Head-to-Head)
+        prob_win_p1 = model.predict_proba(X)[0][1]
+        
+        # 4. INFERENCIA DE PROBABILIDAD DE SAQUE (Ingeniería Inversa)
+        # Si P1 es muy favorito, su prob de saque será mayor que su media habitual
+        # Ajustamos la media histórica del jugador según la calidad del rival
+        base_serve_p1 = d1['ewma_serve'] # Ej: 0.65
+        base_serve_p2 = d2['ewma_serve'] # Ej: 0.62
+        
+        # Factor de ajuste basado en la predicción del modelo ML
+        # Si ML dice 80% victoria, subimos la prob de saque de P1
+        bias = (prob_win_p1 - 0.50) * 0.15 # Ajuste fino
+        
+        sim_p1_serve = np.clip(base_serve_p1 + bias, 0.50, 0.85)
+        sim_p2_serve = np.clip(base_serve_p2 - bias, 0.50, 0.85)
+        
+        st.write(f"**Parámetros de Simulación:** P1 Serve Win: {sim_p1_serve:.1%} | P2 Serve Win: {sim_p2_serve:.1%}")
+        
+        # 5. MONTE CARLO
+        with st.spinner("🎲 Simulando 2,000 partidos punto a punto..."):
+            sim_results = monte_carlo_match(sim_p1_serve, sim_p2_serve, best_of)
             
-            winner = p1 if prob_p1 >= 0.5 else p2
-            prob_win = prob_p1 if prob_p1 >= 0.5 else 1 - prob_p1
-
-            # --- VISUALIZACIÓN ---
-            st.markdown(f"""
-            <div class='main-card'>
-                <div style='display:flex; justify-content:space-between;'>
-                    <div style='text-align:center;'><div class='player-header'>{p1}</div><small>Elo {int(d1['elo'])}</small></div>
-                    <div class='vs'>VS</div>
-                    <div style='text-align:center;'><div class='player-header'>{p2}</div><small>Elo {int(d2['elo'])}</small></div>
-                </div>
-                <div style='text-align:center; margin-top:10px;'>
-                    <div class='win-prob'>{winner} {prob_win*100:.1f}%</div>
-                    <small>Juegos Estimados: <b>{pred_games:.1f}</b> (±{std_games:.1f})</small>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # === CALCULADORAS ===
-            t1, t2, t3 = st.tabs(["🏆 Ganador", "🔢 Over/Under", "🏁 Hándicap"])
-
-            with t1:
-                st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
-                c_odd, c_res = st.columns([1, 2])
-                with c_odd: odd_val = st.number_input(f"Cuota {winner}", value=1.50, step=0.05)
-                with c_res:
-                    implied = 1/odd_val
-                    edge = prob_win - implied
-                    st.write(f"Prob. Real: **{prob_win*100:.1f}%** | Prob. Casa: **{implied*100:.1f}%**")
-                    if edge > 0.02: st.markdown(f"<div class='val-good'>✅ VALOR: +{edge*100:.1f}%</div>", unsafe_allow_html=True)
-                    else: st.markdown(f"<div class='val-bad'>❌ SIN VALOR ({edge*100:.1f}%)</div>", unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-
-            with t2:
-                st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
-                st.info(f"🧠 La IA predice **{pred_games:.1f}** juegos. Calculando probabilidades...")
+        # --- RESULTADOS ---
+        win_pct = sim_results['winner'].value_counts(normalize=True).get(1, 0)
+        avg_games = sim_results['total_games'].mean()
+        
+        # Header
+        c_head1, c_head2, c_head3 = st.columns(3)
+        c_head1.markdown(f"<div class='metric-card'><div class='sub-text'>{p1_name} Win%</div><div class='big-number'>{win_pct:.1%}</div></div>", unsafe_allow_html=True)
+        c_head2.markdown(f"<div class='metric-card'><div class='sub-text'>Total Juegos (Media)</div><div class='big-number'>{avg_games:.1f}</div></div>", unsafe_allow_html=True)
+        c_head3.markdown(f"<div class='metric-card'><div class='sub-text'>Cuota Justa</div><div class='big-number'>{1/win_pct if win_pct>0 else 0:.2f}</div></div>", unsafe_allow_html=True)
+        
+        # TABS DE APUESTAS
+        tab_ou, tab_handicap, tab_sets = st.tabs(["🔢 Over/Under", "🏁 Hándicap", "📊 Marcador Exacto"])
+        
+        with tab_ou:
+            st.write("#### Probabilidades Reales (Basadas en 2,000 simulaciones)")
+            lines = range(18, 30) if best_of == 3 else range(30, 45)
+            data_ou = []
+            for line in lines:
+                prob_over = (sim_results['total_games'] > line).mean()
+                prob_under = 1 - prob_over
+                # Solo mostramos líneas competitivas (entre 20% y 80%)
+                if 0.15 < prob_over < 0.85:
+                    data_ou.append({
+                        "Línea": line,
+                        "Over %": f"{prob_over:.1%}",
+                        "Cuota Over": f"{1/prob_over:.2f}",
+                        "Under %": f"{prob_under:.1%}",
+                        "Cuota Under": f"{1/prob_under:.2f}"
+                    })
+            st.dataframe(pd.DataFrame(data_ou), hide_index=True, use_container_width=True)
+            
+        with tab_handicap:
+            st.write(f"#### Hándicap {p1_name} (Juegos)")
+            h_lines = [-5.5, -4.5, -3.5, -2.5, -1.5, 1.5, 2.5, 3.5, 4.5]
+            data_h = []
+            for h in h_lines:
+                # Cubre hándicap si (JuegosP1 - JuegosP2) > Handicap
+                # Ej: P1 gana por 4 juegos. Hándicap -3.5. 4 > 3.5 -> Gana
+                # Ojo: En handicap negativo, necesitamos ganar por MÁS de eso.
+                # Hándicap -3.5 significa diff_games > 3.5
+                prob_cover = (sim_results['diff_games'] + h > 0).mean() 
                 
-                col_line, col_odd_ou = st.columns(2)
-                # IMPORTANTE: Como estamos dentro de session_state, cambiar estos inputs NO cerrará la vista
-                with col_line: line_ou = st.number_input("Línea Juegos (ej: 22.5)", value=float(int(pred_games)), step=0.5)
-                with col_odd_ou: odd_ou = st.number_input("Cuota Over", value=1.85, step=0.05)
-                
-                z_score = (line_ou - pred_games) / std_games
-                prob_under = norm.cdf(z_score)
-                prob_over = 1 - prob_under
-                
-                col_res_over, col_res_under = st.columns(2)
-                with col_res_over:
-                    st.write(f"**OVER {line_ou}**")
-                    st.write(f"Prob: **{prob_over*100:.1f}%**")
-                    fair_odd_over = 1/prob_over if prob_over > 0 else 99
-                    edge_over = prob_over - (1/odd_ou)
-                    if edge_over > 0.02: st.markdown(f"<span class='val-good'>✅ VALOR (Cuota > {fair_odd_over:.2f})</span>", unsafe_allow_html=True)
-                    else: st.markdown(f"<span class='val-bad'>❌ NO ENTRAR</span>", unsafe_allow_html=True)
+                if 0.10 < prob_cover < 0.90:
+                    data_h.append({
+                        "Hándicap": h,
+                        "Probabilidad": f"{prob_cover:.1%}",
+                        "Cuota Justa": f"{1/prob_cover:.2f}"
+                    })
+            st.dataframe(pd.DataFrame(data_h), hide_index=True, use_container_width=True)
+            
+        with tab_sets:
+            st.write("#### Marcador de Sets")
+            counts = sim_results['score'].value_counts(normalize=True)
+            st.bar_chart(counts)
+            st.write(counts)
 
-                with col_res_under:
-                    st.write(f"**UNDER {line_ou}**")
-                    st.write(f"Prob: **{prob_under*100:.1f}%**")
-                    fair_odd_under = 1/prob_under if prob_under > 0 else 99
-                    st.write(f"Cuota justa: {fair_odd_under:.2f}")
-                st.markdown("</div>", unsafe_allow_html=True)
-
-            with t3:
-                st.markdown("<div class='bet-section'>", unsafe_allow_html=True)
-                expected_diff = (prob_p1 - 0.5) * 8 
-                st.write(f"Diferencia esperada: **{expected_diff:.1f}** juegos para {p1}")
-                h_line = st.number_input(f"Hándicap {p1} (ej: -3.5)", value=-2.5, step=0.5)
-                dist = expected_diff - h_line
-                prob_cover = 1 / (1 + np.exp(-0.5 * dist))
-                st.write(f"Probabilidad de cubrir {h_line}: **{prob_cover*100:.1f}%**")
-                st.markdown("</div>", unsafe_allow_html=True)
-
-        else: st.error("Faltan datos.")
+    elif analyze:
+        st.warning("Selecciona dos jugadores distintos.")
