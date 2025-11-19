@@ -1,52 +1,89 @@
 import pandas as pd
 import time
+import random
 from nba_api.stats.endpoints import leaguegamelog
-from nba_api.stats.static import teams
+import requests.adapters
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN ROBUSTA ---
 ARCHIVO_SALIDA = "nba_games.csv"
 TEMPORADAS = ['2020-21', '2021-22', '2022-23', '2023-24', '2024-25']
+TIMEOUT_SEG = 100  # Subimos tiempo de espera a 100 segundos
+MAX_RETRIES = 3    # Intentos por temporada
+
+# Headers para parecer un navegador real y evitar bloqueo
+HEADERS_CUSTOM = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.nba.com/',
+    'Connection': 'keep-alive'
+}
 
 print("==========================================================")
-print("   🏀 ACTUALIZADOR NBA (OFFICIAL API) 🏀")
+print("   🏀 ACTUALIZADOR NBA (MODO ROBUSTO) 🏀")
 print("==========================================================")
 
 dfs = []
 
+def descargar_con_reintentos(season, tipo):
+    intentos = 0
+    while intentos < MAX_RETRIES:
+        try:
+            print(f"   ⏳ Intento {intentos+1} para {season} ({tipo})...", end=" ")
+            
+            # Llamada a la API con Timeout ampliado
+            log = leaguegamelog.LeagueGameLog(
+                season=season, 
+                season_type_all_star=tipo,
+                headers=HEADERS_CUSTOM,
+                timeout=TIMEOUT_SEG 
+            )
+            df = log.get_data_frames()[0]
+            df['SeasonType'] = tipo
+            print(f"✅ Ok ({len(df)} juegos)")
+            return df
+            
+        except Exception as e:
+            print(f"❌ Fallo: {e}")
+            intentos += 1
+            # Espera exponencial: 5s, 10s, 15s... para que no nos baneen
+            wait_time = 5 * intentos + random.randint(1, 3)
+            time.sleep(wait_time)
+            
+    print(f"   ⚠️ IMPOSIBLE descargar {season} {tipo} tras {MAX_RETRIES} intentos.")
+    return None
+
+# --- PROCESO DE DESCARGA ---
 for temp in TEMPORADAS:
-    print(f"⬇️  Descargando temporada {temp}...", end=" ")
-    try:
-        # Descargar Regular Season
-        log_reg = leaguegamelog.LeagueGameLog(season=temp, season_type_all_star='Regular Season').get_data_frames()[0]
-        log_reg['SeasonType'] = 'Regular'
-        
-        # Descargar Playoffs (Importante para la "memoria" de equipos buenos)
-        log_play = leaguegamelog.LeagueGameLog(season=temp, season_type_all_star='Playoffs').get_data_frames()[0]
-        log_play['SeasonType'] = 'Playoffs'
-        
-        # Unir
-        df_temp = pd.concat([log_reg, log_play])
-        dfs.append(df_temp)
-        print(f"✅ {len(df_temp)} partidos.")
-        
-        # Respetar límites de la API (evitar ban)
-        time.sleep(1) 
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    print(f"⬇️ Procesando {temp}...")
+    
+    # 1. Regular Season
+    df_reg = descargar_con_reintentos(temp, 'Regular Season')
+    if df_reg is not None: dfs.append(df_reg)
+    
+    # Pausa de seguridad entre llamadas
+    time.sleep(random.randint(2, 5))
+    
+    # 2. Playoffs
+    df_play = descargar_con_reintentos(temp, 'Playoffs')
+    if df_play is not None: dfs.append(df_play)
+    
+    print("-" * 30)
 
 if not dfs:
-    print("❌ No se han podido descargar datos.")
+    print("❌ ERROR CRÍTICO: No se ha podido descargar NINGÚN dato de la NBA.")
+    # Creamos un CSV vacío para que el workflow no explote en el siguiente paso, aunque no funcionará la IA
+    pd.DataFrame(columns=['GAME_DATE', 'MATCHUP']).to_csv(ARCHIVO_SALIDA, index=False)
     exit()
 
-print("\n--- 🔄 Procesando Datos... ---")
+# --- FUSIÓN ---
+print("\n--- 🔄 Fusionando Datos... ---")
 df_total = pd.concat(dfs, ignore_index=True)
 
-# Limpieza Básica
-df_total['GAME_DATE'] = pd.to_datetime(df_total['GAME_DATE'])
-df_total.sort_values('GAME_DATE', inplace=True)
+# Limpieza
+if 'GAME_DATE' in df_total.columns:
+    df_total['GAME_DATE'] = pd.to_datetime(df_total['GAME_DATE'])
+    df_total.sort_values('GAME_DATE', inplace=True)
 
-# Guardar
 df_total.to_csv(ARCHIVO_SALIDA, index=False)
 print(f"✅ Base de datos NBA guardada: {len(df_total)} registros.")
-print("Ahora ejecuta: python crear_ia_nba.py")
+print("Listo para crear_ia_nba.py")
