@@ -80,8 +80,8 @@ def load_data():
 
 model, features, db = load_data()
 
-if not db:
-    st.error("⚠️ Sistema detenido: Faltan archivos de datos (ejecuta actualizar_auto.py).")
+if db is None:
+    st.error("⚠️ Sistema detenido: Faltan archivos de datos...")
     st.stop()
 
 # --- MOTOR SIMULACIÓN (MATH FIX) ---
